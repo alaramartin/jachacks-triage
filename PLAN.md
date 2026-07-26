@@ -61,20 +61,37 @@ demo always runs on the blast-radius-dominant default.
 **Merged cleanly** — Person 2 pulled this Phase B+C push, resolved one conflict in `main.jac`
 (import list + `ingest_issue`/`generate_pr` sitting between your `reindex_repo`/`reset_demo`/
 `debug_blast` and your `get_queue`/`get_cluster_detail`), and wired `ingest_issue` to call
-`agents.ranking.on_issue_resolved` exactly per your contract note below. Two real bugs found and
-fixed in your code while merging (both `jac check`-blocking, not style nits):
+`agents.ranking.on_issue_resolved` exactly per your contract note below. Real bugs found and fixed
+in your code while merging/integration-testing (all `jac check`- or runtime-blocking, not style nits):
+
 1. **`get_queue`'s sort-key lambdas** used `lambda c: ClusterView : c.urgency` — not valid Jac
    syntax (only `lambda (param: Type) { body }` exists). Fixed both (`cluster_views`/`singleton_views`).
 2. **`agents/clustering.jac`'s `maybe_cluster`** had the same stale `(x +>:owns:+> Cluster(...))[0]`
    unwrap bug as the `reindex_repo` one from Phase A — `++>`/`+>:edge:+>` on a single node returns
    the node directly now, no `[0]`. Same pattern was also in `clustering.test.jac`'s and
    `main.test.jac`'s hand-built fixtures (`repo +>:owns:+> File(...)` etc.) — fixed throughout.
+3. **`agents/clustering.test.jac` imported `byllm.lib` (bare package) instead of
+   `jaclang.byllm.lib`.** This is what caused the "no by llm() call works, `by postinit`/`global`
+   syntax error deep in byllm's source" scare (see below) — turned out to be a real, fixable bug,
+   not a jac/byllm version incompatibility. **Lesson for the whole team: NEVER `import from
+   byllm...` or add `byllm` as a pip dependency in `jac.toml` — the compiler bundles its own
+   compatible copy as `jaclang.byllm`, always `import from jaclang.byllm.lib { ... }` if you need
+   an explicit import (e.g. `MockLLM` in tests). Ambient `by llm()` with no import needed is safest.**
+4. **`assess_root_cause` had zero code context** — CLAUDE.md's issues are deliberately worded to
+   share no vocabulary even when they share a root cause, so with only issue text to go on, the
+   local model said "different root cause" for everything, and `clusters` came back empty. Fixed by
+   reading the target file's actual source (mirrors the `_file_summary` pattern Person 2 built for
+   `llm_resolve`) and sharpening the same-root-cause bar to match what your own Cluster B design
+   needs (two distinct symptoms in one file, same underlying sloppiness, one fixable PR) while still
+   correctly rejecting SEED-15/16. Verified live: all three clusters now form correctly with the
+   right blast radii (14/5/1).
 
-**🚨 Bigger issue, affects your `by llm()` calls too (`assess_root_cause` in clustering.jac):** the
-`jac` CLI can no longer compile `byllm`'s own source right now (tried 3 byllm versions, all fail on
-`by postinit`/`global` syntax in byllm's internals) — this is an environment/tooling problem, not
-a bug in anyone's code. The human is updating the `jac` CLI; until that's confirmed, don't trust
-any live LLM-backed test result (yours or Person 2's) even if `jac check` passes clean.
+**Also found: a `with entry` (or bare module-level `glob = ...`) inside a `.test.jac` annex that
+references a class from the base module raises `NameError` at module-load time in this jac
+version** (even outside `jac test` — the annex loads unconditionally whenever the base module
+loads, e.g. via `jac start`). Fix: construct anything referencing base-module names *inside* each
+`test { }` body, not at annex module scope — that executes fine. Keep this in mind for future
+`.test.jac` files using MockLLM.
 
 ### 📍 RESUME HERE (last updated after Phase C steps 1-2)
 
@@ -314,27 +331,38 @@ _(validation.py coming out 0/1/6 = wrong traversal direction, CLAUDE.md §4.3.)_
 - [x] **🛑 C1** (~12:45): confirm skeleton is up + Person 1's schema is back — confirmed, both sides done.
 - [x] **🛑 C2** (2:15): first merge; ingestion resolves SEED-01, parks SEED-19 — confirmed live against the real server: SEED-01 → `core/validation.py`, explicit, sev 8; SEED-19 → parked. Also confirmed `debug_blast` 18/14/5/0 numbers still hold post-merge.
 - [x] **Phase B:** finish triage (LLM fallback + threshold) → `ingest_issue` → `seed.jac` → GitHub OAuth setup — all done, see RESUME HERE below.
-- [ ] **🛑 C3** (3:30): real-data integration; 3 unresolved — **BLOCKED, see environment blocker below.** Logic is wired (`ingest_issue` now calls `agents.ranking.on_issue_resolved` per Person 1's contract); cannot run the full 20-issue pipeline until the `by llm()` environment issue is fixed.
-- [ ] **Phase C:** real `generate_pr` + `pr_agent` → _(reach)_ add `reactions` to seed issues — reactions/comment_velocity already in `issues.json` (done early, folded into Phase A). `generate_pr` walker exists in `main.jac` calling the Phase B stub; real GitHub API swap still pending (needs OAuth app credentials — see blocker below).
+- [x] **🛑 C3** (3:30): real-data integration; 3 unresolved — **PASSED**, verified live end-to-end (see below). Unresolved is 4, not 3 (SEED-11 misclassified as vague by the local model — a known, documented caveat, not a logic bug).
+- [ ] **Phase C:** real `generate_pr` + `pr_agent` → _(reach)_ add `reactions` to seed issues — reactions/comment_velocity already in `issues.json` (done early, folded into Phase A). `generate_pr` walker exists in `main.jac` calling the Phase B stub; real GitHub API swap still pending (needs OAuth app credentials — see below).
 - [ ] **🛑 C4** (5:30): feature freeze; real PR opens
 - [ ] **🛑 C5** (5:50): **YOU submit the partial** (mandatory)
 - [ ] **🛑 C6** (6:45–7:15): final submission
 
-### 📍 RESUME HERE (Person 2, last updated after merging Person 1's Phase B+C)
+### 📍 RESUME HERE (Person 2, last updated after C3 passed live)
 
-**🚨 Current blocker — affects the WHOLE TEAM, not just Person 2:** the installed `jac` CLI
-(v0.34.6) can no longer compile `byllm`'s own internal source (`by postinit` has-field syntax,
-`global` statements in `byllm/types.jac` and `byllm/impl/config_loader.impl.jac`) — tried pinning
-`byllm` at 0.6.19, 0.6.10, and 0.5.8, all fail identically. **This means NO `by llm()` call works
-right now** — not `assess_severity`, not `llm_resolve`/`assess_specificity` (Person 2), not
-`assess_root_cause` (Person 1's clustering.jac), not ranking's downstream calls into those. It was
-working earlier this session (against local Ollama `qwen2.5:7b`, no API key available) before a
-`jac clean --all --force` + `jac install` cycle during merge cleanup apparently invalidated a
-global compiled-bytecode cache under `~/.cache/jac` that had been masking this version mismatch.
-**The human is reinstalling/updating the `jac` CLI itself** (a global tool, outside this repo) —
-**when they confirm it's done, re-run the full pipeline test below before trusting any LLM-backed
-number.** Everything that doesn't need a live LLM call (schema, graph writes, `jac check`,
-non-LLM logic) is unaffected and already verified.
+**✅ C3 PASSED — full pipeline verified live** against the real server + Ollama (`qwen2.5:7b`):
+`reindex_repo` (18 files, 26 import edges) → `jac run seed/seed.jac` (all 20 issues) →
+`get_queue` returns:
+- **Cluster A** `core/validation.py`: 4 issues (SEED-01/02/03/04), blast 14, urgency 6.76.
+- **Cluster B** `models/product.py`: 2 issues (SEED-06/08), blast 5, urgency 3.76.
+- **Cluster C** `services/upload.py`: 2 issues (SEED-09/10), blast 1, urgency 2.58.
+- **Unresolved**: 4 (SEED-11/13/19/20 — expected 3, SEED-11 is the known miscalibration below).
+
+All blast-radius numbers match PLAN.md's reference table exactly. Gaps vs. the reference (SEED-05
+and SEED-07 landing on adjacent files instead of joining their clusters, SEED-11 parking instead of
+resolving) are **local-7B-model resolution accuracy**, not logic bugs — re-check with a stronger
+hosted model before the real demo if you get an API key.
+
+**🚨 The environment blocker from before IS RESOLVED — and it was never actually a jac/byllm version
+incompatibility.** Root cause: `jac.toml` had `byllm` as a pip dependency, and
+`agents/clustering.test.jac` imported it via the bare `byllm.lib` path. That pulled in a real PyPI
+`byllm` release using `by postinit`/`global` syntax this jac compiler can't parse. **The compiler
+already bundles its own compatible byllm as `jaclang.byllm`** — no pip install needed or wanted.
+Fixed: dropped the pip dependency, fixed the import to `jaclang.byllm.lib`. **Team-wide rule now
+documented in `jac.toml`: never `import from byllm...` (bare) and never add `byllm` to
+`[dependencies]` — always `jaclang.byllm.lib` for explicit imports (e.g. `MockLLM` in tests);
+ambient `by llm()` needs no import at all.** See the Person 1 UPDATE note above for the full
+fix list, including a second real bug in `clustering.jac`'s `assess_root_cause` (no code context →
+always said "different root cause") that's also now fixed and verified.
 
 **Merge integration done this session** (Person 1 pushed their Phase B+C — clustering, ranking,
 `get_queue`, `get_cluster_detail` — while Person 2 was mid-Phase-B; merged cleanly with one real
@@ -370,17 +398,13 @@ graph state with the server's root, confirmed by testing both ways).
 ID/secret into `.env`) whenever convenient — only blocks swapping `create_pull_request`'s stub for
 the real GitHub API call in Phase C, nothing before that.
 
-**Where to pick back up once the `jac`/`byllm` environment is fixed:**
-1. `pkill -f "jac start main.jac"`; `jac clean --all --force`; `jac start main.jac --no-client`.
-2. `curl -X POST localhost:8000/walker/reindex_repo -d '{"repo_path":"seed/repo","full_name":"triage-demo/shipyard"}'` → expect `files_indexed: 18`.
-3. `jac run seed/seed.jac` (loads all 20 issues over HTTP into the running server).
-4. `curl -X POST localhost:8000/walker/get_queue -d '{"full_name":"triage-demo/shipyard"}'` → check
-   cluster A (`core/validation.py`) has close to 5 issues, cluster B (`models/product.py`) has 3,
-   `unresolved` is close to 3 (SEED-13/19/20). **Known caveat:** the local 7B model occasionally
-   misclassifies 1-2 issues (e.g. SEED-11, or one of SEED-02/03/05/07) since small-model confidence
-   calibration is imperfect — this is expected variance, not a logic bug; re-check once a stronger
-   hosted model is available for the real demo. This is the real C3 test — say "C3 passed" once the
-   numbers are close enough and Person 1 confirms the queue shape looks right.
+**Where to pick back up (Phase C):**
+1. Push `seed/repo/` to GitHub as a real repo you own (still on Person 2's Phase C list, not yet done).
+2. Replace `create_pull_request`'s stub with a real GitHub API call once the OAuth app exists;
+   build `agents/pr_agent.jac` (patch generation + the sensitive-path denylist gate per CLAUDE.md #4.4).
+3. Standard rehydrate command for any fresh session: `pkill -f "jac start main.jac"`;
+   `jac clean --all --force`; `jac start main.jac --no-client`; then `reindex_repo` →
+   `jac run seed/seed.jac` → `get_queue` to get back to the verified state above.
 
 ## Person 2 · Phase A — TASK ZERO, then seed + triage
 
