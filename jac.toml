@@ -28,12 +28,12 @@ typescript = "^5.3.3"
 base_route_app = "app"
 port = 8000
 
-[plugins.client]
+[client]
 
 # Single place the whole team configures the LLM (CLAUDE.md #7: "Don't scatter
-# model names"). Section MUST be [plugins.byllm.model] - a bare [byllm.model]
-# is silently ignored by jaclang's plugin config loader (verified against
-# jaclang/jac0core/impl/runtime.impl.jac - plugin config lives under
-# [plugins.<name>]).
-[plugins.byllm.model]
+# model names"). Verified against jac-config docs + a live jac test run:
+# [byllm.model] is a top-level table, NOT [plugins.byllm.model] - the old
+# [plugins.<name>] path silently fails to parse and byLLM falls back to
+# OpenAI (which errors with no API key set).
+[byllm.model]
 default_model = "${BYLLM_DEFAULT_MODEL:-ollama/qwen2.5:7b}"
