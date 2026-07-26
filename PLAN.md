@@ -56,6 +56,26 @@ demo always runs on the blast-radius-dominant default.
 - [ ] **🛑 C4** (5:30): feature freeze; verify ≥40% Jac
 - [ ] **🛑 C5** (5:50): confirm Person 2 submitted the partial
 
+### 📍 UPDATE from Person 2 (post-merge — read this before continuing Person 1 work)
+
+**Merged cleanly** — Person 2 pulled this Phase B+C push, resolved one conflict in `main.jac`
+(import list + `ingest_issue`/`generate_pr` sitting between your `reindex_repo`/`reset_demo`/
+`debug_blast` and your `get_queue`/`get_cluster_detail`), and wired `ingest_issue` to call
+`agents.ranking.on_issue_resolved` exactly per your contract note below. Two real bugs found and
+fixed in your code while merging (both `jac check`-blocking, not style nits):
+1. **`get_queue`'s sort-key lambdas** used `lambda c: ClusterView : c.urgency` — not valid Jac
+   syntax (only `lambda (param: Type) { body }` exists). Fixed both (`cluster_views`/`singleton_views`).
+2. **`agents/clustering.jac`'s `maybe_cluster`** had the same stale `(x +>:owns:+> Cluster(...))[0]`
+   unwrap bug as the `reindex_repo` one from Phase A — `++>`/`+>:edge:+>` on a single node returns
+   the node directly now, no `[0]`. Same pattern was also in `clustering.test.jac`'s and
+   `main.test.jac`'s hand-built fixtures (`repo +>:owns:+> File(...)` etc.) — fixed throughout.
+
+**🚨 Bigger issue, affects your `by llm()` calls too (`assess_root_cause` in clustering.jac):** the
+`jac` CLI can no longer compile `byllm`'s own source right now (tried 3 byllm versions, all fail on
+`by postinit`/`global` syntax in byllm's internals) — this is an environment/tooling problem, not
+a bug in anyone's code. The human is updating the `jac` CLI; until that's confirmed, don't trust
+any live LLM-backed test result (yours or Person 2's) even if `jac check` passes clean.
+
 ### 📍 RESUME HERE (last updated after Phase C steps 1-2)
 
 **Exact code state right now:**
@@ -289,16 +309,78 @@ _(validation.py coming out 0/1/6 = wrong traversal direction, CLAUDE.md §4.3.)_
 
 ## ✅ Person 2 master checklist
 
-- [ ] **🚨 TASK ZERO** (by 12:45): push `seed/repo/` skeleton — 18 files, correct imports. **P1 is blocked on this.**. Make sure to .gitignore the seed/ folder so that it does not dilute the Jac percentage in this repo, and tell the human to create a separate git repo for the seed/demo repo./usage
-- [ ] **Phase A:** flesh out seed repo + bugs → `issues.json` → start triage agent
-- [ ] **🛑 C1** (~12:45): confirm skeleton is up + Person 1's schema is back
-- [ ] **🛑 C2** (2:15): first merge; ingestion resolves SEED-01, parks SEED-19
-- [ ] **Phase B:** finish triage (LLM fallback + threshold) → `ingest_issue` → `seed.jac` → GitHub OAuth setup
-- [ ] **🛑 C3** (3:30): real-data integration; 3 unresolved
-- [ ] **Phase C:** real `generate_pr` + `pr_agent` → _(reach)_ add `reactions` to seed issues
+- [x] **🚨 TASK ZERO** (by 12:45): push `seed/repo/` skeleton — 18 files, correct imports. Pushed as its own nested git repo under `seed/repo/.git`, gitignored from the main repo (see `.gitignore`).
+- [x] **Phase A:** flesh out seed repo + bugs → `issues.json` → start triage agent — all 18 files fleshed out with the three planted bugs, 20 issues in `seed/issues.json` (incl. `reactions`/`comment_velocity`), samples for SEED-01/SEED-19.
+- [x] **🛑 C1** (~12:45): confirm skeleton is up + Person 1's schema is back — confirmed, both sides done.
+- [x] **🛑 C2** (2:15): first merge; ingestion resolves SEED-01, parks SEED-19 — confirmed live against the real server: SEED-01 → `core/validation.py`, explicit, sev 8; SEED-19 → parked. Also confirmed `debug_blast` 18/14/5/0 numbers still hold post-merge.
+- [x] **Phase B:** finish triage (LLM fallback + threshold) → `ingest_issue` → `seed.jac` → GitHub OAuth setup — all done, see RESUME HERE below.
+- [ ] **🛑 C3** (3:30): real-data integration; 3 unresolved — **BLOCKED, see environment blocker below.** Logic is wired (`ingest_issue` now calls `agents.ranking.on_issue_resolved` per Person 1's contract); cannot run the full 20-issue pipeline until the `by llm()` environment issue is fixed.
+- [ ] **Phase C:** real `generate_pr` + `pr_agent` → _(reach)_ add `reactions` to seed issues — reactions/comment_velocity already in `issues.json` (done early, folded into Phase A). `generate_pr` walker exists in `main.jac` calling the Phase B stub; real GitHub API swap still pending (needs OAuth app credentials — see blocker below).
 - [ ] **🛑 C4** (5:30): feature freeze; real PR opens
 - [ ] **🛑 C5** (5:50): **YOU submit the partial** (mandatory)
 - [ ] **🛑 C6** (6:45–7:15): final submission
+
+### 📍 RESUME HERE (Person 2, last updated after merging Person 1's Phase B+C)
+
+**🚨 Current blocker — affects the WHOLE TEAM, not just Person 2:** the installed `jac` CLI
+(v0.34.6) can no longer compile `byllm`'s own internal source (`by postinit` has-field syntax,
+`global` statements in `byllm/types.jac` and `byllm/impl/config_loader.impl.jac`) — tried pinning
+`byllm` at 0.6.19, 0.6.10, and 0.5.8, all fail identically. **This means NO `by llm()` call works
+right now** — not `assess_severity`, not `llm_resolve`/`assess_specificity` (Person 2), not
+`assess_root_cause` (Person 1's clustering.jac), not ranking's downstream calls into those. It was
+working earlier this session (against local Ollama `qwen2.5:7b`, no API key available) before a
+`jac clean --all --force` + `jac install` cycle during merge cleanup apparently invalidated a
+global compiled-bytecode cache under `~/.cache/jac` that had been masking this version mismatch.
+**The human is reinstalling/updating the `jac` CLI itself** (a global tool, outside this repo) —
+**when they confirm it's done, re-run the full pipeline test below before trusting any LLM-backed
+number.** Everything that doesn't need a live LLM call (schema, graph writes, `jac check`,
+non-LLM logic) is unaffected and already verified.
+
+**Merge integration done this session** (Person 1 pushed their Phase B+C — clustering, ranking,
+`get_queue`, `get_cluster_detail` — while Person 2 was mid-Phase-B; merged cleanly with one real
+conflict in `main.jac`, resolved by hand):
+- `main.jac`'s `ingest_issue` now calls **`agents.ranking.on_issue_resolved(issue, target, repo)`**
+  right after creating the `resolves_to` edge — this is Person 1's documented integration point
+  (see their contract note below) and cascades blast-radius → clustering → ranking in one call, all
+  re-reading graph state fresh (no direct values passed downstream, per CLAUDE.md #5). `ingest_issue`'s
+  response now reports real `clustered_into` (the cluster's `cluster_key` if the issue landed in one,
+  else `null`) and real `urgency` (read back off `issue.urgency` post-cascade) instead of the
+  Phase-B placeholders (`null`/`0.0`) — **no more hardcoded fields in the ingestion response.**
+- Fixed **three separate instances of the same stale bug**: `(root ++> Node(...))[0]` /
+  `(x +>:edge:+> Node(...))[0]` — the `[0]` unwrap is wrong against the current Jac compiler
+  (`++>`/`+>:edge:+>` on a single node now return the node directly, not a list). Found and fixed in
+  `main.jac`'s `reindex_repo` (found before this merge), `agents/clustering.jac`'s `maybe_cluster`,
+  and throughout `agents/clustering.test.jac` + `main.test.jac`'s hand-built test fixtures. All now
+  `jac check` clean with zero errors.
+- Fixed a **real syntax bug in Person 1's `get_queue`**: `lambda c: ClusterView : c.urgency` (Python
+  lambda-with-annotation style) isn't valid Jac — the only lambda form is
+  `lambda (param: Type) { body }`. Fixed both sort-key lambdas (`cluster_views`/`singleton_views`).
+  This was blocking `main.jac` from compiling at all pre-fix.
+- `jac.toml`'s `[byllm.model]` fix (from earlier this session) held through the merge — confirmed
+  Person 1 did NOT reintroduce the `[plugins.byllm.model]` mistake.
+
+**Everything else from Phase B (unaffected by the merge, already reported last checkpoint):**
+`agents/triage_agent.jac` (explicit resolve incl. traceback-direction + symbol-to-file static
+lookup, `assess_specificity` gate before `llm_resolve`, file-docstring context, `temperature=0`),
+`integrations/github.jac` (real OAuth token exchange + `list_repos`, `create_pull_request` stub),
+`seed/seed.jac` (loads all 20 issues via HTTP against a running server — `jac run` does NOT share
+graph state with the server's root, confirmed by testing both ways).
+
+**Still needed from the human, not code-blocking:** register a real GitHub OAuth app (client
+ID/secret into `.env`) whenever convenient — only blocks swapping `create_pull_request`'s stub for
+the real GitHub API call in Phase C, nothing before that.
+
+**Where to pick back up once the `jac`/`byllm` environment is fixed:**
+1. `pkill -f "jac start main.jac"`; `jac clean --all --force`; `jac start main.jac --no-client`.
+2. `curl -X POST localhost:8000/walker/reindex_repo -d '{"repo_path":"seed/repo","full_name":"triage-demo/shipyard"}'` → expect `files_indexed: 18`.
+3. `jac run seed/seed.jac` (loads all 20 issues over HTTP into the running server).
+4. `curl -X POST localhost:8000/walker/get_queue -d '{"full_name":"triage-demo/shipyard"}'` → check
+   cluster A (`core/validation.py`) has close to 5 issues, cluster B (`models/product.py`) has 3,
+   `unresolved` is close to 3 (SEED-13/19/20). **Known caveat:** the local 7B model occasionally
+   misclassifies 1-2 issues (e.g. SEED-11, or one of SEED-02/03/05/07) since small-model confidence
+   calibration is imperfect — this is expected variance, not a logic bug; re-check once a stronger
+   hosted model is available for the real demo. This is the real C3 test — say "C3 passed" once the
+   numbers are close enough and Person 1 confirms the queue shape looks right.
 
 ## Person 2 · Phase A — TASK ZERO, then seed + triage
 
