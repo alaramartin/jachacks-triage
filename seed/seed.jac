@@ -12,9 +12,14 @@ Run from the repo root, server already up:
 Idempotent only insofar as ingest_issue is - re-running adds duplicate Issue
 nodes, so call reset_demo first if you want a clean re-seed."""
 import json;
+import os;
 import from urllib.request { Request, urlopen }
 
-glob BASE_URL: str = "http://localhost:8000";
+# The API port depends on how the server was started:
+#   jac start main.jac --no-client  -> API on 8000 (the default below)
+#   jac start main.jac --dev        -> app on 8000, API on 8001
+# Override without editing this file:  TRIAGE_API=http://localhost:8001 jac run seed/seed.jac
+glob BASE_URL: str = os.environ.get("TRIAGE_API", "http://localhost:8000");
 
 def _post(path: str, payload: dict) -> dict {
     data: bytes = json.dumps(payload).encode("utf-8");
