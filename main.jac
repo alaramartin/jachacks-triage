@@ -25,7 +25,7 @@ import from agents.ranking {
     weighted_urgency,
     weighted_cluster_urgency
 }
-import from integrations.github { create_pull_request }
+import from agents.pr_agent { build_pr_for_cluster }
 
 # ============================== Person 1 — Graph & Agents ==============================
 walker:pub reindex_repo {
@@ -38,7 +38,7 @@ walker:pub reindex_repo {
         if len(existing) > 0 {
             repo = existing[0];
         } else {
-            repo = (root ++> Repo(full_name=self.full_name))[0];
+            repo = root ++> Repo(full_name=self.full_name);
         }
 
         already_indexed: list[File] = [repo->:owns:->][?:File];
@@ -192,9 +192,8 @@ walker:pub ingest_issue {
 }
 
 # generate_pr is human-triggered ONLY (CLAUDE.md #2: no automatic PR generation).
-# create_pull_request is a Phase B STUB (integrations/github.jac) returning a
-# fake but stable PR - Phase C swaps it for a real GitHub API call behind the
-# same signature, so this walker does not change.
+# All GitHub-specific + LLM-fix domain logic lives in agents/pr_agent.jac
+# (Person 2) - this walker just resolves the cluster/repo and reports the result.
 walker:pub generate_pr {
     has cluster_id: str;
 
@@ -223,16 +222,15 @@ walker:pub generate_pr {
             target_path = targets[0].path;
         }
 
-        title: str = f"fix: {cluster.cluster_key}";
-        if cluster.title {
-            title = f"fix({target_path}): {cluster.title}";
-        }
-        body: str = cluster.root_cause_summary;
-
-        result = create_pull_request(repo.full_name, title, body);
+        result = build_pr_for_cluster(cluster, repo);
         if not result.ok {
             report {"ok": False, "error": result.error};
             disengage;
+        }
+
+        title: str = f"fix: {cluster.cluster_key}";
+        if cluster.title {
+            title = f"fix({target_path}): {cluster.title}";
         }
 
         pr: PullRequest = PullRequest(
@@ -240,7 +238,7 @@ walker:pub generate_pr {
             url=result.pr_url,
             status="open",
             title=title,
-            body=body,
+            body=cluster.root_cause_summary,
         );
         repo +>:owns:+> pr;
         pr +>:fixes:+> cluster;
@@ -384,7 +382,7 @@ walker:pub get_queue {
                 )
             );
         }
-        cluster_views.sort(key=lambda c: ClusterView : c.urgency, reverse=True);
+        cluster_views.sort(key=lambda (c: ClusterView) { c.urgency; }, reverse=True);
 
         singleton_views: list[SingletonView] = [];
         unresolved_views: list[UnresolvedView] = [];
@@ -424,7 +422,9 @@ walker:pub get_queue {
                 );
             }
         }
-        singleton_views.sort(key=lambda s: SingletonView : s.urgency, reverse=True);
+        singleton_views.sort(
+            key=lambda (s: SingletonView) { s.urgency; }, reverse=True
+        );
 
         report QueueResponse(
             repo=repo.full_name,
@@ -459,7 +459,7 @@ walker:pub set_weights {
         settings_matches: list[Settings] = [repo->:owns:->][?:Settings];
         settings: Settings = settings_matches[0]
             if len(settings_matches) > 0
-            else (repo +>:owns:+> Settings())[0];
+            else repo +>:owns:+> Settings();
 
         settings.w_blast = self.w_blast;
         settings.w_sev = self.w_sev;

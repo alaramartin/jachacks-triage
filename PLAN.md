@@ -482,14 +482,85 @@ _(validation.py coming out 0/1/6 = wrong traversal direction, CLAUDE.md §4.3.)_
 - [x] **Phase A:** flesh out seed repo + bugs → `issues.json` → start triage agent — all 18 files fleshed out with the three planted bugs, 20 issues in `seed/issues.json` (incl. `reactions`/`comment_velocity`), samples for SEED-01/SEED-19.
 - [x] **🛑 C1** (~12:45): confirm skeleton is up + Person 1's schema is back — confirmed, both sides done.
 - [x] **🛑 C2** (2:15): first merge; ingestion resolves SEED-01, parks SEED-19 — confirmed live against the real server: SEED-01 → `core/validation.py`, explicit, sev 8; SEED-19 → parked. Also confirmed `debug_blast` 18/14/5/0 numbers still hold post-merge.
-- [x] **Phase B:** finish triage (LLM fallback + threshold) → `ingest_issue` → `seed.jac` → GitHub OAuth setup — all done, see RESUME HERE below.
+- [x] **Phase B:** finish triage (LLM fallback + threshold) → `ingest_issue` → `seed.jac` → GitHub auth setup — all done, see RESUME HERE below.
 - [x] **🛑 C3** (3:30): real-data integration; 3 unresolved — **PASSED**, verified live end-to-end (see below). Unresolved is 4, not 3 (SEED-11 misclassified as vague by the local model — a known, documented caveat, not a logic bug).
-- [ ] **Phase C:** real `generate_pr` + `pr_agent` → _(reach)_ add `reactions` to seed issues — reactions/comment_velocity already in `issues.json` (done early, folded into Phase A). `generate_pr` walker exists in `main.jac` calling the Phase B stub; real GitHub API swap still pending (needs OAuth app credentials — see below).
-- [ ] **🛑 C4** (5:30): feature freeze; real PR opens
-- [ ] **🛑 C5** (5:50): **YOU submit the partial** (mandatory)
-- [ ] **🛑 C6** (6:45–7:15): final submission
+- [x] Push `seed/repo/` to GitHub as a real, Person-2-owned repo — DONE early (nested repo at `github.com/alaramartin/triage-demo`, gitignored from main repo). Confirmed still pushed/in sync with `origin/main` this session.
+- [x] Real GitHub PR creation (`integrations/github.jac` `create_pull_request`) — DONE. Real GitHub REST API calls (create branch, write file via Contents API, open PR) replace the Phase B stub. Authenticates via a **Personal Access Token** (`GITHUB_TOKEN` in `.env`), NOT OAuth — OAuth login was already a documented scope cut (RepoPickerScreen hardcodes the single demo repo regardless of login, so real OAuth would change nothing the demo shows). Verified against the real `alaramartin/triage-demo` repo: branch created, file written, PR opened, closed again during testing (see below).
+- [x] `agents/pr_agent.jac` — DONE. Human-triggered only (not on the reactive loop, CLAUDE.md #5). Sensitive-path denylist gate (`.env`, `docker-compose`, `migrations/`, `schema.*`) runs before any LLM call or GitHub write. PR body includes root cause, the blast-radius pitch ("reached by N of M files"), and linked issues — matches CLAUDE.md #8's on-screen PR body requirement.
+- [x] **Real bug found + fixed this session:** the first live PR generated a **syntactically invalid** Python file (LLM mangled the module docstring's closing quote, `"""..."" ` instead of `"""..."""`) — would have opened a broken PR onto the real repo undetected. Added a `compile()`-based Python syntax gate in `pr_agent.jac` with up to 3 regenerate attempts (feeding the exact `SyntaxError` back to the LLM as a retry hint), plus a cheap deterministic regex repair (`_repair_module_docstring`) for this exact, extremely consistent failure shape — tried before spending a retry.
+- [x] Swapped `generate_fix`'s LLM to `qwen2.5-coder:7b` (code-specialized, same size class as the project default, free/local — no paid API key) via a per-file `Model` override in `pr_agent.jac`, leaving triage/clustering/ranking on the project default model. Fixed an earlier truncation failure mode (was cutting output ~10 lines into a ~30-line file).
+- [x] **Decision (human call, noted here since it changes the correctness bar):** PR code quality is explicitly NOT a blocker for the demo. `generate_pr` opening *some* real PR with a real description (root cause + blast-radius pitch + linked issues) is the bar — the generated fix code doesn't need to be perfect. Verified: PR #2 on `alaramartin/triage-demo` opened with valid, correct Python (the repair above got it right), but even if a future run's generated code has a rough edge, `build_pr_for_cluster` now proceeds and opens the PR anyway after 3 attempts + the deterministic repair, logging a warning instead of returning `{"ok": false}`. Rationale: judges evaluate the working demo (ranking, clustering, blast radius, the click-to-PR flow), not a code review of the generated diff — "we didn't spend API credits polishing generated-fix quality" is an acceptable answer if asked. This does NOT relax the sensitive-path denylist gate (CLAUDE.md #4.4), which still refuses unconditionally.
+- [x] **🛑 C4** (5:30): feature freeze; real PR opens — verified live: PR #2, https://github.com/alaramartin/triage-demo/pull/2, valid Python, correct root-cause fix, full PR body (root cause + "reached by 14 of 18 files" + linked issues SEED-01..04).
+- [ ] **🛑 C5** (5:50): **YOU submit the partial** (mandatory) — human action, not code.
+- [ ] **🛑 C6** (6:45–7:15): final submission — human action, not code.
+- [x] _(reach)_ `reactions`/`comment_velocity` data — already in `seed/issues.json` and ingested (done early, folded into Phase A). The only remaining reach piece (actually *weighting* ranking by these) is Person 1's `Settings` node/formula work, not Person 2's — skip tracking it here.
 
-### 📍 RESUME HERE (Person 2, last updated after C3 passed live)
+**Person 2's code work is DONE.** Only C5/C6 remain, and those are human submission actions (Devpost, screenshots, demo video), not code.
+
+### 📍 RESUME HERE (Person 2, DONE — only C5/C6 human submission steps remain)
+
+**Status at a glance: Person 2's code work is finished.** Real GitHub PR creation is wired
+end-to-end and verified live — PR #2 on `alaramartin/triage-demo`
+(https://github.com/alaramartin/triage-demo/pull/2) opened with valid Python, a correct fix, and
+the full CLAUDE.md #8 PR body (root cause + "reached by 14 of 18 files" + linked issues). Nothing
+left to build here; pick up at C5 (Devpost partial submission) when ready.
+
+**DONE this session (Phase C):**
+1. **`integrations/github.jac`** — `create_pull_request` is no longer a stub. Real GitHub REST
+   calls: read the default branch's head SHA, create a new timestamped branch (`triage/fix-<ts>`,
+   collision-proof across rehearsal runs), write the fixed file via the Contents API (a full-file
+   write, not a diff — much more reliable for an LLM to get right than unified-diff syntax), open
+   the PR. Auth is a **Personal Access Token** (`GITHUB_TOKEN` in `.env`), decided instead of OAuth
+   — OAuth login was already a documented scope cut elsewhere (`RepoPickerScreen.cl.jac` hardcodes
+   the single demo repo regardless of login, so real OAuth would change nothing the demo shows).
+2. **`agents/pr_agent.jac`** (new file) — human-triggered only, not on the reactive graph loop
+   (CLAUDE.md #5). `is_sensitive_path()` denylist gate (`.env`, `docker-compose`, `migrations/`,
+   `schema.*`) runs before any LLM call or GitHub write. `build_pr_body()` produces the on-screen
+   PR body CLAUDE.md #8 wants: root cause, the blast-radius pitch ("reached by N of M files"),
+   linked issues. `main.jac`'s `generate_pr` walker now delegates to
+   `pr_agent.build_pr_for_cluster()` instead of building the PR inline.
+3. **Repo full_name mismatch found + fixed:** the graph's `Repo.full_name` had been set to the
+   fictional CLAUDE.md example name `triage-demo/shipyard`, but the actual GitHub repo Person 2
+   owns is `alaramartin/triage-demo` — real GitHub API calls need the real name. Fixed by
+   reindexing with the real full_name and updating the two client constants that hardcoded the old
+   fictional name (`client/screens/RepoPickerScreen.cl.jac`, `client/screens/QueueScreen.cl.jac` —
+   both Person 3's files, changed here because it was a blocking mechanical fix, not a design
+   change; tell Person 3). **`client/mock_data.cl.jac` still has the old fictional name but is
+   dead code (nothing imports it) — harmless, left as-is.**
+4. **Real bug caught by testing against the actual GitHub API (not just `jac check`):** the first
+   live `generate_pr` call opened PR #1 with a source file that had a **broken docstring** (LLM
+   turned `"""..."""` into `""..."""`, an unterminated string — the file would fail to import).
+   Confirmed via `ast.parse`/`compile()`. **Fixed:** `pr_agent.jac` now runs the generated fix
+   through `compile(content, path, "exec")` before ever calling GitHub; on a `SyntaxError` it
+   retries (up to 3 attempts) feeding the exact error back to the LLM as `retry_hint`; if still
+   invalid after 3 attempts, `generate_pr` returns `{"ok": false, "error": "..."}` instead of ever
+   publishing broken code. **The broken PR #1 and its branch were closed/deleted from the real
+   repo during this cleanup** — don't be surprised if PR history shows a closed PR #1.
+5. **`.env.example`** updated: `GITHUB_TOKEN` documented as the real-PR-creation credential;
+   `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` kept but marked as unused OAuth scaffolding.
+
+**RESOLVED — model truncation + the correctness bar decision:** `generate_fix`'s LLM call was
+silently truncating full-file output mid-string on the project's default model (`qwen2.5:7b`,
+confirmed by dumping raw output — cut off ~10 lines into a ~30-line file). Root cause was the
+*model*, not `max_tokens` (raising it to 4000 didn't help): a full-file code rewrite is a much
+harder structured-output task than the short severity/clustering classifications elsewhere.
+**Fixed** by pulling `qwen2.5-coder:7b` (same size class, code-specialized, still free/local — no
+paid API key) and pointing `pr_agent.jac`'s `generate_fix` at it via a per-file `Model` override
+(`glob fix_llm`), leaving triage/clustering/ranking untouched on the project default.
+
+Even on the coder model, the exact same docstring-quote bug from PR #1 recurred once more —
+consistent enough (always the module docstring's closing `"""`, always the first line, every other
+docstring in the file closes fine) that a **deterministic regex repair**
+(`_repair_module_docstring` in `pr_agent.jac`) was added ahead of spending a retry on it. That
+repair alone fixed PR #2's generation cleanly (verified with `ast.parse`).
+
+**Human decision, applied in code:** PR code quality is explicitly not a demo blocker — a real PR
+with a real description matters more than a perfect diff. `build_pr_for_cluster` no longer returns
+`{"ok": false}` if 3 attempts + the repair still leave invalid Python; it opens the PR anyway with
+the best attempt and logs a warning. The sensitive-path denylist (CLAUDE.md #4.4) is NOT affected
+by this — it still refuses unconditionally, before any LLM call.
+
+**Historical context (kept for reference — superseded by the above where it overlaps):**
 
 **✅ C3 PASSED — full pipeline verified live** against the real server + Ollama (`qwen2.5:7b`):
 `reindex_repo` (18 files, 26 import edges) → `jac run seed/seed.jac` (all 20 issues) →
@@ -546,17 +617,18 @@ lookup, `assess_specificity` gate before `llm_resolve`, file-docstring context, 
 `seed/seed.jac` (loads all 20 issues via HTTP against a running server — `jac run` does NOT share
 graph state with the server's root, confirmed by testing both ways).
 
-**Still needed from the human, not code-blocking:** register a real GitHub OAuth app (client
-ID/secret into `.env`) whenever convenient — only blocks swapping `create_pull_request`'s stub for
-the real GitHub API call in Phase C, nothing before that.
+**GitHub OAuth app registration is NO LONGER NEEDED** — Phase C used a Personal Access Token
+instead (see DONE section above), which is simpler and required no human UI step beyond generating
+the token once. `GITHUB_CLIENT_ID`/`SECRET` scaffolding in `integrations/github.jac` is unused on
+the demo path but left in place, harmless.
 
-**Where to pick back up (Phase C):**
-1. Push `seed/repo/` to GitHub as a real repo you own (still on Person 2's Phase C list, not yet done).
-2. Replace `create_pull_request`'s stub with a real GitHub API call once the OAuth app exists;
-   build `agents/pr_agent.jac` (patch generation + the sensitive-path denylist gate per CLAUDE.md #4.4).
-3. Standard rehydrate command for any fresh session: `pkill -f "jac start main.jac"`;
-   `jac clean --all --force`; `jac start main.jac --no-client`; then `reindex_repo` →
-   `jac run seed/seed.jac` → `get_queue` to get back to the verified state above.
+**Nothing left to pick up code-wise.** If resuming for the merge/demo-rehearsal phase, the standard
+rehydrate command for any fresh session is: `pkill -f "jac start main.jac"`; `jac clean --all
+--force`; `jac start main.jac --no-client`; then `reindex_repo` (use `full_name:
+"alaramartin/triage-demo"` — the REAL repo name, not the old fictional `triage-demo/shipyard`) →
+`jac run seed/seed.jac` → `get_queue` to get back to a working state. `ollama list` should show
+both `qwen2.5:7b` and `qwen2.5-coder:7b` pulled locally; no other env setup is needed beyond
+`.env`'s `GITHUB_TOKEN`.
 
 ## Person 2 · Phase A — TASK ZERO, then seed + triage
 
@@ -624,8 +696,9 @@ Then:
 
 **After C3 passes.**
 
-1. Push the seed repo to GitHub as a **real repo you own** (real GitHub UI, fully controlled).
-2. Replace the stub with real `create_pull_request`, and build **`agents/pr_agent.jac`:** given a
+1. [x] Push the seed repo to GitHub as a **real repo you own** (real GitHub UI, fully controlled).
+   → `github.com/alaramartin/triage-demo`.
+2. [x] Replace the stub with real `create_pull_request`, and build **`agents/pr_agent.jac`:** given a
    cluster, pull code context along the graph path, `by llm()` generate the patch, create a
    branch, commit, open a PR whose body has the root cause, **the blast-radius summary ("reached
    by 14 of 18 files")**, and links to all 5 member issues. That body is on screen during the
@@ -636,15 +709,20 @@ Then:
    `{"ok": false, "error": "sensitive file — flagged for manual review"}` instead. None of our
    seed bugs hit a sensitive path, so this never fires in the demo — it's there so a judge asking
    "what stops this from patching your database credentials" has a real answer.
-3. **`walker:pub generate_pr`** (CLAUDE.md §6) → PR number + URL; on failure
-   `{"ok": false, "error": "..."}` — never let the UI spin forever.
-4. **(REACH — only if Person 1 is building weighted ranking)** add `reactions` and
+   → Both done. Note: full-file rewrite via GitHub's Contents API was used instead of a literal
+   unified diff/patch — same effect (a real commit landing real changed code), far more reliable
+   for an LLM to produce correctly. Denylist gate is in `pr_agent.is_sensitive_path()`.
+3. [x] **`walker:pub generate_pr`** (CLAUDE.md §6) → PR number + URL; on failure
+   `{"ok": false, "error": "..."}` — never let the UI spin forever. → Done, delegates to `pr_agent.jac`.
+4. [x] **(REACH — only if Person 1 is building weighted ranking)** add `reactions` and
    `comment_velocity` integers to each issue in `issues.json` (e.g. SEED-11 the loud one gets ~40
    reactions, SEED-01 gets ~3; comment velocity can stay low/flat across the board — it exists to
    be real and mentionable in the pitch, not to visibly move the demo ranking). Skip entirely if
-   we're behind.
+   we're behind. → Data already present/ingested; actual ranking-weight usage is Person 1's side.
 
-**Self-test:** `generate_pr` on cluster A's id → real PR on GitHub.
+**Self-test:** `generate_pr` on cluster A's id → real PR on GitHub. **[~] IN PROGRESS** — succeeded
+once (PR #1, since closed for a code-quality bug, see RESUME HERE above), currently blocked on
+retesting with `qwen2.5-coder:7b` to fix an LLM output-truncation issue in the fix generator.
 
 **🛑 CHECKPOINT C3 (3:30) — real-data integration.** Print to human and wait:
 

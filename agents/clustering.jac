@@ -38,8 +38,7 @@ obj RootCauseGate {
     has same_root_cause: bool;
     has title: str;  # short title IF same_root_cause, else ""
     has root_cause_summary: str;  # 1-3 sentences IF same_root_cause, else ""
-    has proposed_fix_summary:
-        str;  # 1 sentence, mechanical fix suggestion IF same_root_cause, else ""
+    has proposed_fix_summary: str;  # 1 sentence, mechanical fix suggestion IF same_root_cause, else ""
 }
 
 sem RootCauseGate = "Whether a set of bug reports, all resolved to the same source file, share one underlying root cause - plus a title and explanation when they do.";
@@ -48,7 +47,9 @@ sem RootCauseGate.title = "A short (<12 word) title naming the shared root cause
 sem RootCauseGate.root_cause_summary = "1-3 sentences: what's actually broken in the target file and why all these reports trace back to it. Empty string if same_root_cause is False.";
 sem RootCauseGate.proposed_fix_summary = "One sentence describing a plausible, mechanically simple code-level fix for the shared root cause (e.g. 'Add a None guard and normalize unicode before length checks.'). Empty string if same_root_cause is False.";
 
-def assess_root_cause(target_path: str, source_code: str, issue_summaries: list[str]) -> RootCauseGate by llm(temperature=0.0);
+def assess_root_cause(
+    target_path: str, source_code: str, issue_summaries: list[str]
+) -> RootCauseGate by llm(temperature=0.0);
 sem assess_root_cause = "Decide whether a group of bug reports that all point at the same source file share one underlying root cause, or are unrelated problems that happen to live in the same file. The reports are DELIBERATELY worded to share little or no vocabulary even when they share a cause (a crash, a truncated emoji, a rejected phone number, and a skipped CSV row can all trace back to the same validation bug) - so judge by reading the actual source code below and checking whether each report's symptom plausibly flows from the SAME function/bug in that code, not by comparing the reports' wording to each other. If the code shows a specific bug (e.g. a missing None check, a byte-vs-character truncation bug), match reports against what THAT bug would actually cause.";
 sem assess_root_cause.target_path = "The shared source file all these issues resolve to.";
 sem assess_root_cause.source_code = "The actual current source of target_path, if available (empty string if not) - read it to judge whether reports plausibly share one root cause in this code, don't just compare report wording.";
@@ -91,7 +92,7 @@ def maybe_cluster(target: File) -> Cluster | None {
         cluster = existing[0];
     } else {
         repos: list[Repo] = [target<-:owns:<-][?:Repo];
-        cluster = (repos[0] +>:owns:+> Cluster(cluster_key=target.path))[0];
+        cluster = repos[0] +>:owns:+> Cluster(cluster_key=target.path);
         cluster +>:cluster_targets:+> target;
     }
 

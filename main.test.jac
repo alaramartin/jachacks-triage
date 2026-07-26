@@ -17,71 +17,61 @@ test "get_queue returns a cluster + singletons + unresolved, sorted by urgency d
     # have their own by-llm-aware tests already. Build the target shape
     # directly (as maybe_cluster/rank_* would have left it) and check the
     # query/sort/serialization logic in isolation.
-    repo = (root ++> Repo(full_name="t/queue-e2e", file_count=18))[0];
-    validation = (repo +>:owns:+> File(path="core/validation.py", blast_radius=14))[0];
-    orders = (repo +>:owns:+> File(path="services/orders.py", blast_radius=1))[0];
-    unresolved_node = (repo +>:owns:+> Unresolved())[0];
+    repo = root ++> Repo(full_name="t/queue-e2e", file_count=18);
+    validation = repo +>:owns:+> File(path="core/validation.py", blast_radius=14);
+    orders = repo +>:owns:+> File(path="services/orders.py", blast_radius=1);
+    unresolved_node = repo +>:owns:+> Unresolved();
 
-    cluster_a = (
-        repo +>:owns:+> Cluster(
-            cluster_key="core/validation.py",
-            title="require_fields() crashes on None/unicode",
-            blast_radius=14,
-            issue_count=5,
-            urgency=7.22,
-            fix_confidence=0.86
-        )
-    )[0];
+    cluster_a = repo +>:owns:+> Cluster(
+        cluster_key="core/validation.py",
+        title="require_fields() crashes on None/unicode",
+        blast_radius=14,
+        issue_count=5,
+        urgency=7.22,
+        fix_confidence=0.86
+    );
     cluster_a +>:cluster_targets:+> validation;
     for n in range(5) {
-        i = (
-            repo +>:owns:+> Issue(
-                external_id=f"E2E-0{n + 1}",
-                title=f"bug {n}",
-                body="crash report",
-                created_at="2026-01-01",
-                severity=9,
-                resolution_method="explicit"
-            )
-        )[0];
+        i = repo +>:owns:+> Issue(
+            external_id=f"E2E-0{n + 1}",
+            title=f"bug {n}",
+            body="crash report",
+            created_at="2026-01-01",
+            severity=9,
+            resolution_method="explicit"
+        );
         i +>:resolves_to:+> validation;
         i +>:grouped_in:+> cluster_a;
     }
 
-    typo = (
-        repo +>:owns:+> Issue(
-            external_id="E2E-15",
-            title="Typo in confirmation message",
-            body="'recieved' should be 'received'",
-            created_at="2026-01-01",
-            severity=1,
-            resolution_method="llm",
-            urgency=0.61
-        )
-    )[0];
+    typo = repo +>:owns:+> Issue(
+        external_id="E2E-15",
+        title="Typo in confirmation message",
+        body="'recieved' should be 'received'",
+        created_at="2026-01-01",
+        severity=1,
+        resolution_method="llm",
+        urgency=0.61
+    );
     typo +>:resolves_to:+> orders;
 
-    perf = (
-        repo +>:owns:+> Issue(
-            external_id="E2E-16",
-            title="Orders list takes 30s",
-            body="perf: full table scan",
-            created_at="2026-01-01",
-            severity=6,
-            resolution_method="llm",
-            urgency=1.78
-        )
-    )[0];
+    perf = repo +>:owns:+> Issue(
+        external_id="E2E-16",
+        title="Orders list takes 30s",
+        body="perf: full table scan",
+        created_at="2026-01-01",
+        severity=6,
+        resolution_method="llm",
+        urgency=1.78
+    );
     perf +>:resolves_to:+> orders;
 
-    parked_issue = (
-        repo +>:owns:+> Issue(
-            external_id="E2E-19",
-            title="doesn't work",
-            body="doesn't work",
-            created_at="2026-01-01"
-        )
-    )[0];
+    parked_issue = repo +>:owns:+> Issue(
+        external_id="E2E-19",
+        title="doesn't work",
+        body="doesn't work",
+        created_at="2026-01-01"
+    );
     unresolved_node +>:parked:+> parked_issue;
 
     result = root spawn get_queue(full_name="t/queue-e2e");
@@ -108,53 +98,47 @@ test "get_queue returns a cluster + singletons + unresolved, sorted by urgency d
 }
 
 test "get_cluster_detail returns issues plus a hop-annotated dependency graph" {
-    repo = (root ++> Repo(full_name="t/detail", file_count=4))[0];
-    validation = (repo +>:owns:+> File(path="core/validation.py", blast_radius=3))[0];
-    db = (repo +>:owns:+> File(path="core/db.py"))[0];
-    order = (repo +>:owns:+> File(path="models/order.py"))[0];
-    orders_svc = (repo +>:owns:+> File(path="services/orders.py"))[0];
+    repo = root ++> Repo(full_name="t/detail", file_count=4);
+    validation = repo +>:owns:+> File(path="core/validation.py", blast_radius=3);
+    db = repo +>:owns:+> File(path="core/db.py");
+    order = repo +>:owns:+> File(path="models/order.py");
+    orders_svc = repo +>:owns:+> File(path="services/orders.py");
 
     db +>:imports:+> validation;
     order +>:imports:+> validation;
     order +>:imports:+> db;
     orders_svc +>:imports:+> order;
 
-    cluster = (
-        repo +>:owns:+> Cluster(
-            cluster_key="core/validation.py",
-            title="require_fields crashes",
-            root_cause_summary="s",
-            blast_radius=3,
-            issue_count=2,
-            urgency=5.0,
-            fix_confidence=0.5,
-            proposed_fix_summary="Add a None guard."
-        )
-    )[0];
+    cluster = repo +>:owns:+> Cluster(
+        cluster_key="core/validation.py",
+        title="require_fields crashes",
+        root_cause_summary="s",
+        blast_radius=3,
+        issue_count=2,
+        urgency=5.0,
+        fix_confidence=0.5,
+        proposed_fix_summary="Add a None guard."
+    );
     cluster +>:cluster_targets:+> validation;
 
-    i1 = (
-        repo +>:owns:+> Issue(
-            external_id="D-1",
-            title="a",
-            body="ba",
-            created_at="2026-01-01",
-            severity=8,
-            resolution_method="explicit"
-        )
-    )[0];
+    i1 = repo +>:owns:+> Issue(
+        external_id="D-1",
+        title="a",
+        body="ba",
+        created_at="2026-01-01",
+        severity=8,
+        resolution_method="explicit"
+    );
     i1 +>:resolves_to:+> validation;
     i1 +>:grouped_in:+> cluster;
-    i2 = (
-        repo +>:owns:+> Issue(
-            external_id="D-2",
-            title="b",
-            body="bb",
-            created_at="2026-01-01",
-            severity=5,
-            resolution_method="llm"
-        )
-    )[0];
+    i2 = repo +>:owns:+> Issue(
+        external_id="D-2",
+        title="b",
+        body="bb",
+        created_at="2026-01-01",
+        severity=5,
+        resolution_method="llm"
+    );
     i2 +>:resolves_to:+> validation;
     i2 +>:grouped_in:+> cluster;
 
@@ -188,25 +172,23 @@ test "get_cluster_detail reports an error for an unknown cluster id" {
 }
 
 test "set_weights changes get_queue's ranking without touching stored Issue.urgency" {
-    repo = (root ++> Repo(full_name="t/weights", file_count=10))[0];
-    target = (repo +>:owns:+> File(path="core/db.py", blast_radius=2))[0];
+    repo = root ++> Repo(full_name="t/weights", file_count=10);
+    target = repo +>:owns:+> File(path="core/db.py", blast_radius=2);
     # Low blast/severity but the loudest reactions in the repo - with default
     # (blast-dominant) weights this should rank low; with reactions weighted
     # up and everything else zeroed, it should be the only signal that matters.
-    loud = (
-        repo +>:owns:+> Issue(
-            external_id="W-1",
-            title="loud",
-            body="b",
-            created_at="2026-01-01",
-            severity=1,
-            estimated_diff_lines=0,
-            reactions=40,
-            comment_velocity=0,
-            resolution_method="llm",
-            urgency=0.11
-        )
-    )[0];
+    loud = repo +>:owns:+> Issue(
+        external_id="W-1",
+        title="loud",
+        body="b",
+        created_at="2026-01-01",
+        severity=1,
+        estimated_diff_lines=0,
+        reactions=40,
+        comment_velocity=0,
+        resolution_method="llm",
+        urgency=0.11
+    );
     loud +>:resolves_to:+> target;
 
     set_result = root spawn set_weights(
