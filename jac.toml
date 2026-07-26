@@ -1,14 +1,38 @@
 [project]
 name = "triage"
 version = "0.1.0"
-description = "Triage — a structural, graph-native lens on the GitHub issue queue."
+description = "Triage - a structural, graph-native lens on the GitHub issue queue."
 entry-point = "main.jac"
+kind = "fullstack"
 
 [byllm.model]
 default_model = "${BYLLM_DEFAULT_MODEL:-ollama/qwen2.5:7b}"
 
 [serve]
 port = 8000
+base_route_app = "app"
 
 [dependencies]
 byllm = "~=0.6"
+
+[dependencies.npm]
+tailwindcss = "^4.0.0"
+"@tailwindcss/vite" = "^4.0.0"
+react = "^18.2.0"
+react-dom = "^18.2.0"
+react-router-dom = "^6.22.0"
+react-error-boundary = "^5.0.0"
+react-hook-form = "^7.71.0"
+zod = "^4.3.6"
+"@hookform/resolvers" = "^5.2.2"
+
+[dependencies.npm.dev]
+vite = "^6.4.1"
+"@vitejs/plugin-react" = "^4.2.1"
+typescript = "^5.3.3"
+"@types/react" = "^18.2.0"
+"@types/react-dom" = "^18.2.0"
+
+[plugins.client.vite]
+plugins = ["tailwindcss()"]
+lib_imports = ["import tailwindcss from '@tailwindcss/vite'"]
