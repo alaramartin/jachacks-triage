@@ -10,7 +10,7 @@ for the demo either way.
 import from "@jac/runtime" { useNavigate }
 sv import from ...main { get_queue }
 
-glob DEMO_REPO: str = "triage-demo/shipyard";
+glob DEMO_REPO: str = "alaramartin/triage-demo";
 
 def:pub RepoPickerScreen -> JsxElement {
     has repo_name: str = DEMO_REPO,

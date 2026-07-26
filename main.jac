@@ -20,7 +20,7 @@ import from integrations.ast_parser { build_code_substrate, count_import_edges }
 import from agents.blast_radius { compute_blast_radius, build_dependency_graph }
 import from agents.triage_agent { resolve_issue, assess_severity, estimate_diff_size }
 import from agents.ranking { on_issue_resolved }
-import from integrations.github { create_pull_request }
+import from agents.pr_agent { build_pr_for_cluster }
 
 # ============================== Person 1 — Graph & Agents ==============================
 walker:pub reindex_repo {
@@ -102,20 +102,22 @@ walker:pub ingest_issue {
     has comment_velocity: int = 0;
 
     can ingest with Root entry {
-        repos: list[Repo] = [root -->][?:Repo];
+        repos: list[Repo] = [root-->][?:Repo];
         if len(repos) == 0 {
             report {"ok": False, "error": "no repo indexed - call reindex_repo first"};
             disengage;
         }
         repo: Repo = repos[0];
 
-        files: list[File] = [repo ->:owns:->][?:File];
+        files: list[File] = [repo->:owns:->][?:File];
         file_paths: list[str] = [f.path for f in files];
 
         # TODO(P1): once Repo stores the on-disk repo_path it was indexed from,
         # pass that through instead of this seed-demo convention (also used as
         # the reindex_repo request's repo_path throughout CLAUDE.md #6).
-        resolution = resolve_issue(self.title, self.body, file_paths, repo_root="seed/repo");
+        resolution = resolve_issue(
+            self.title, self.body, file_paths, repo_root="seed/repo"
+        );
         severity: int = assess_severity(self.title, self.body);
         diff_lines: int = estimate_diff_size(self.title, self.body);
 
@@ -134,7 +136,7 @@ walker:pub ingest_issue {
         repo +>:owns:+> issue;
 
         if resolution.path is None {
-            unresolved_matches: list[Unresolved] = [repo ->:owns:->][?:Unresolved];
+            unresolved_matches: list[Unresolved] = [repo->:owns:->][?:Unresolved];
             unresolved: Unresolved;
             if len(unresolved_matches) > 0 {
                 unresolved = unresolved_matches[0];
@@ -153,7 +155,11 @@ walker:pub ingest_issue {
             disengage;
         }
 
-        target_matches: list[File] = [f for f in files if f.path == resolution.path];
+        target_matches: list[File] = [
+            f
+            for f in files
+            if f.path == resolution.path
+        ];
         target: File = target_matches[0];
         issue +>:resolves_to:+> target;
 
@@ -164,7 +170,7 @@ walker:pub ingest_issue {
         on_issue_resolved(issue, target, repo);
 
         clustered_into: str | None = None;
-        issue_clusters: list[Cluster] = [issue ->:grouped_in:->];
+        issue_clusters: list[Cluster] = [issue->:grouped_in:->];
         if len(issue_clusters) > 0 {
             clustered_into = issue_clusters[0].cluster_key;
         }
@@ -182,9 +188,8 @@ walker:pub ingest_issue {
 }
 
 # generate_pr is human-triggered ONLY (CLAUDE.md #2: no automatic PR generation).
-# create_pull_request is a Phase B STUB (integrations/github.jac) returning a
-# fake but stable PR - Phase C swaps it for a real GitHub API call behind the
-# same signature, so this walker does not change.
+# All GitHub-specific + LLM-fix domain logic lives in agents/pr_agent.jac
+# (Person 2) - this walker just resolves the cluster/repo and reports the result.
 walker:pub generate_pr {
     has cluster_id: str;
 
@@ -200,29 +205,28 @@ walker:pub generate_pr {
             disengage;
         }
 
-        repos: list[Repo] = [root -->][?:Repo];
+        repos: list[Repo] = [root-->][?:Repo];
         if len(repos) == 0 {
             report {"ok": False, "error": "no repo indexed"};
             disengage;
         }
         repo: Repo = repos[0];
 
-        targets: list[File] = [cluster ->:cluster_targets:->][?:File];
+        targets: list[File] = [cluster->:cluster_targets:->][?:File];
         target_path: str = cluster.cluster_key;
         if len(targets) > 0 {
             target_path = targets[0].path;
         }
 
-        title: str = f"fix: {cluster.cluster_key}";
-        if cluster.title {
-            title = f"fix({target_path}): {cluster.title}";
-        }
-        body: str = cluster.root_cause_summary;
-
-        result = create_pull_request(repo.full_name, title, body);
+        result = build_pr_for_cluster(cluster, repo);
         if not result.ok {
             report {"ok": False, "error": result.error};
             disengage;
+        }
+
+        title: str = f"fix: {cluster.cluster_key}";
+        if cluster.title {
+            title = f"fix({target_path}): {cluster.title}";
         }
 
         pr: PullRequest = PullRequest(
@@ -230,7 +234,7 @@ walker:pub generate_pr {
             url=result.pr_url,
             status="open",
             title=title,
-            body=body,
+            body=cluster.root_cause_summary,
         );
         repo +>:owns:+> pr;
         pr +>:fixes:+> cluster;
@@ -380,7 +384,9 @@ walker:pub get_queue {
                 );
             }
         }
-        singleton_views.sort(key=lambda (s: SingletonView) { s.urgency; }, reverse=True);
+        singleton_views.sort(
+            key=lambda (s: SingletonView) { s.urgency; }, reverse=True
+        );
 
         report QueueResponse(
             repo=repo.full_name,

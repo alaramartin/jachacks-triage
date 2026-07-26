@@ -14,7 +14,7 @@ import from ..components.UnresolvedList { UnresolvedList }
 # Single demo repo, same convention used throughout (reindex_repo's full_name
 # in CLAUDE.md §6 and every seed/seed.jac ingestion call) - there is no live
 # multi-repo GitHub listing (OAuth is an accepted, documented scope cut).
-glob DEMO_REPO: str = "triage-demo/shipyard";
+glob DEMO_REPO: str = "alaramartin/triage-demo";
 
 def _issue_summary_to_dict(i: any) -> dict {
     return {
