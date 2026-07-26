@@ -23,8 +23,8 @@ def:pub RepoPickerScreen() -> JsxElement {
                 className="w-full flex items-center justify-between rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 hover:bg-[var(--color-surface-raised)] transition-colors text-left"
             >
                 <div>
-                    <div className="font-semibold text-zinc-100">{mock_queue.repo}</div>
-                    <div className="text-xs text-zinc-500 mt-0.5">{str(mock_queue.file_count)} files indexed</div>
+                    <div className="font-semibold text-zinc-100">{mock_queue["repo"]}</div>
+                    <div className="text-xs text-zinc-500 mt-0.5">{str(mock_queue["file_count"])} files indexed</div>
                 </div>
                 <span className="text-zinc-500">→</span>
             </button>

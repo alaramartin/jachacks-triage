@@ -14,7 +14,7 @@ import from ..components.UnresolvedList { UnresolvedList }
 
 def:pub QueueScreen() -> JsxElement {
     has expanded_id: str | None = None,
-        pr_banner: str | None = None;
+        pr_result: dict | None = None;
 
     nav = useNavigate();
 
@@ -23,9 +23,14 @@ def:pub QueueScreen() -> JsxElement {
     }
 
     def handle_generate_pr(cluster_id: str) {
-        # MOCK: no generate_pr endpoint yet (Person 2, Phase C). Show a stand-in
-        # result banner so the click has visible feedback during rehearsal.
-        pr_banner = "Mock PR opened for " + cluster_id + " - wire to walker/generate_pr in Phase C.";
+        # MOCK: shapes the response exactly like the real walker/generate_pr
+        # contract (CLAUDE.md §6 - {ok, pr_number, pr_url} or {ok: false, error}),
+        # so Phase C swaps this for `await generate_pr(cluster_id)` and keeps the
+        # same `if pr_result["ok"] { ... } else { ... }` branch below unchanged.
+        # None of the seed bugs hit the sensitive-path denylist, so the real demo
+        # always takes the success branch - the error branch exists for the
+        # "what stops this from patching your database credentials" answer.
+        pr_result = {"ok": True, "pr_number": 7, "pr_url": "https://github.com/triage-demo/shipyard/pull/7"};
     }
 
     def handle_open_detail(cluster_id: str) {
@@ -33,41 +38,53 @@ def:pub QueueScreen() -> JsxElement {
     }
 
     def dismiss_banner(_e: MouseEvent) {
-        pr_banner = None;
+        pr_result = None;
     }
+
+    clusters = mock_queue["clusters"] as list[dict];
+    singletons = mock_queue["singletons"] as list[dict];
+    unresolved = mock_queue["unresolved"] as list[dict];
 
     return <div className="min-h-screen px-6 py-8 max-w-4xl mx-auto">
         <div className="flex items-baseline justify-between mb-1">
-            <h1 className="text-2xl font-bold text-zinc-100">{mock_queue.repo}</h1>
-            <span className="text-xs text-zinc-500">{str(mock_queue.file_count)} files</span>
+            <h1 className="text-2xl font-bold text-zinc-100">{mock_queue["repo"]}</h1>
+            <span className="text-xs text-zinc-500">{str(mock_queue["file_count"])} files</span>
         </div>
         <p className="text-sm text-zinc-500 mb-6">Ranked by structural blast radius, not by how the issue is worded.</p>
 
-        {if pr_banner is not None {
-            <div className="mb-4 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] px-4 py-3 flex items-center justify-between">
-                <span className="text-sm text-zinc-200">{pr_banner}</span>
+        {if pr_result is not None and pr_result["ok"] {
+            <div key="pr-success" className="mb-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 flex items-center justify-between">
+                <span className="text-sm text-zinc-200">
+                    PR #{str(pr_result["pr_number"])} opened - <a href={pr_result["pr_url"]} target="_blank" className="underline text-emerald-300">review on GitHub</a>
+                </span>
+                <button onClick={dismiss_banner} className="text-xs text-zinc-400 hover:text-zinc-100">dismiss</button>
+            </div>
+        }}
+        {if pr_result is not None and not pr_result["ok"] {
+            <div key="pr-error" className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 flex items-center justify-between">
+                <span className="text-sm text-red-200">Couldn't open PR: {pr_result["error"]}</span>
                 <button onClick={dismiss_banner} className="text-xs text-zinc-400 hover:text-zinc-100">dismiss</button>
             </div>
         }}
 
         <div className="flex flex-col gap-3">
-            {for cluster in mock_queue.clusters {
+            {for cluster in clusters {
                 <ClusterRow
-                    key={cluster.id}
+                    key={cluster["id"]}
                     cluster={cluster}
-                    expanded={expanded_id == cluster.id}
-                    onToggle={lambda -> None { toggle_cluster(cluster.id); }}
+                    expanded={expanded_id == cluster["id"]}
+                    onToggle={lambda -> None { toggle_cluster(cluster["id"] as str); }}
                     onGeneratePr={handle_generate_pr}
                     onOpenDetail={handle_open_detail}
                 />
             }}
-            {for issue in mock_queue.singletons {
-                <SingletonRow key={issue.id} issue={issue} />
+            {for issue in singletons {
+                <SingletonRow key={issue["id"]} issue={issue} />
             }}
         </div>
 
         <div className="mt-6">
-            <UnresolvedList issues={mock_queue.unresolved} />
+            <UnresolvedList issues={unresolved} />
         </div>
     </div>;
 }
