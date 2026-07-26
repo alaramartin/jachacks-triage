@@ -6,13 +6,14 @@ import from .screens.RepoPickerScreen { RepoPickerScreen }
 import from .screens.QueueScreen { QueueScreen }
 import from .cluster_view { ClusterView }
 
-def:pub app() -> JsxElement {
-    return <Router>
-        <Routes>
-            <Route path="/" element={<LoginScreen />} />
-            <Route path="/repos" element={<RepoPickerScreen />} />
-            <Route path="/queue" element={<QueueScreen />} />
-            <Route path="/cluster/:id" element={<ClusterView />} />
-        </Routes>
-    </Router>;
+def:pub app -> JsxElement {
+    return
+        <Router>
+            <Routes>
+                <Route path="/" element={<LoginScreen/>}/>
+                <Route path="/repos" element={<RepoPickerScreen/>}/>
+                <Route path="/queue" element={<QueueScreen/>}/>
+                <Route path="/cluster/:id" element={<ClusterView/>}/>
+            </Routes>
+        </Router>;
 }
