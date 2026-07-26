@@ -17,7 +17,7 @@ def compute_blast_radius(target: File) -> int {
 
     while len(queue) > 0 {
         current: File = queue.pop(0);
-        for dependent in [current <-:imports:<-] {
+        for dependent in [current<-:imports:<-] {
             dep_id: str = jid(dependent);
             if dep_id not in visited {
                 visited.add(dep_id);
@@ -26,7 +26,7 @@ def compute_blast_radius(target: File) -> int {
         }
     }
 
-    radius: int = len(visited) - 1;   # exclude target itself
+    radius: int = len(visited) - 1;  # exclude target itself
     target.blast_radius = radius;
     return radius;
 }
@@ -39,4 +39,52 @@ def maybe_compute_blast_radius(target: File) -> int {
         return compute_blast_radius(target);
     }
     return target.blast_radius;
+}
+
+"""Powers get_cluster_detail's `graph` payload (CLAUDE.md #6): same reverse
+BFS as compute_blast_radius, but keeps hop distance per node and the
+in-set `imports` edges instead of collapsing to a count. `id`/`label` use
+the File's path (not jid) to match the frozen API example. Edges are kept
+in code direction (`from` imports `to`) and only between two nodes that are
+both in the reachable set."""
+def build_dependency_graph(target: File) -> dict[str, list] {
+    hops_by_id: dict[str, int] = {};
+    file_by_id: dict[str, File] = {};
+    target_id: str = jid(target);
+    hops_by_id[target_id] = 0;
+    file_by_id[target_id] = target;
+    queue: list[File] = [target];
+
+    while len(queue) > 0 {
+        current: File = queue.pop(0);
+        current_hops: int = hops_by_id[jid(current)];
+        for dependent in [current<-:imports:<-] {
+            dep_id: str = jid(dependent);
+            if dep_id not in hops_by_id {
+                hops_by_id[dep_id] = current_hops + 1;
+                file_by_id[dep_id] = dependent;
+                queue.append(dependent);
+            }
+        }
+    }
+
+    nodes: list[dict[str, object]] = [];
+    for (fid, hops) in hops_by_id.items() {
+        f: File = file_by_id[fid];
+        role: str = "target" if fid == target_id else "dependent";
+        nodes.append({"id": f.path, "label": f.path, "role": role, "hops": hops});
+    }
+
+    edges: list[dict[str, object]] = [];
+    for fid in hops_by_id.keys() {
+        f: File = file_by_id[fid];
+        for imported in [f->:imports:->] {
+            imported_id: str = jid(imported);
+            if imported_id in hops_by_id {
+                edges.append({"from": f.path, "to": imported.path});
+            }
+        }
+    }
+
+    return {"nodes": nodes, "edges": edges};
 }
