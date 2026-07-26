@@ -45,18 +45,158 @@ demo always runs on the blast-radius-dominant default.
 
 ## ✅ Person 1 master checklist
 
-- [x] **Phase A:** node schema → AST parser → `reindex_repo` → `reset_demo` + `debug_blast` → blast-radius agent
-- [x] **🛑 C1** (~12:45): confirm Person 2's seed repo is in (`find` == 18 files) — CONFIRMED: seed/repo is its own GitHub repo (github.com/alaramartin/triage-demo), cloned locally, 18 real module files + 1 token tests/test_smoke.py = 19 total .py files, matches reference exactly.
-- [x] **🛑 C2** (2:15): first merge; **blast radius of validation.py MUST == 14** — CONFIRMED EARLY against real seed repo: core/validation.py=14, core/db.py=12, models/product.py=5, utils/logging.py=0. reindex_repo: 19 files indexed, 27 import edges. Also fixed a jac.toml bug: byllm model config must be under `[plugins.byllm.model]`, not `[byllm.model]` (jaclang's plugin config loader silently ignores the latter). Team is using local Ollama (ollama/qwen2.5:7b).
-- [x] **Phase B:** clustering agent → ranking agent → `get_queue` — DONE. clustering.jac's over-clustering guard tested with MockLLM incl. SEED-15/16 anti-cluster case; ranking.jac's formula tested against hand-computed values; get_queue tested against constructed graph state (cluster + singletons + unresolved, sorted by urgency desc). NOTE: agents/triage_agent.jac (Person 2's file) has no MockLLM override, so its tests will fail until Ollama is running locally - expected, not a bug.
-- [ ] **🛑 C3** (3:30): real-data integration; full ranked queue correct
-- [x] **Phase C (steps 1-2):** `get_cluster_detail` (with graph payload) → performance — DONE,
-      self-tested with hand-built graph state (main.test.jac now has 3 tests). Performance already
-      satisfied — no recomputation added. _(reach weighted ranking still not started — see below.)_
-- [ ] **🛑 C4** (5:30): feature freeze; verify ≥40% Jac
-- [ ] **🛑 C5** (5:50): confirm Person 2 submitted the partial
+**Bottom line: everything in Person 1's scope that can be done independently IS done.** Every
+remaining item is either a coordination step for the human or blocked on something outside
+Person 1's owned files. See the four buckets below — this is the authoritative status, re-derived
+from scratch this session rather than trusted from older notes.
+
+### ✅ DONE
+
+- [x] **Phase A:** node schema → AST parser → `reindex_repo` → `reset_demo` + `debug_blast` →
+      blast-radius agent.
+- [x] **🛑 C1** (~12:45): confirmed Person 2's seed repo landed (19 `.py` files incl. the token
+      test file, matches reference).
+- [x] **🛑 C2** (2:15): first merge; blast radius of `core/validation.py` confirmed == 14 against
+      the real seed repo, both at merge time and again this session.
+- [x] **Phase B:** clustering agent → ranking agent → `get_queue`, all self-tested with hand-built
+      graph state + MockLLM (SEED-15/16 anti-cluster case covered).
+- [x] **🛑 C3** (3:30): real-data integration; full ranked queue verified live (blast radii
+      14/5/1) — see the 🚨 CRITICAL section below for the compiler-breaking regressions found in
+      this code on a second machine and fixed this session.
+- [x] **Phase C steps 1-2:** `get_cluster_detail` (with the `graph` payload: role/hops/edges) +
+      performance (already satisfied — `get_queue` only reads cached `blast_radius`, never
+      recomputes). Self-tested, `jac check` clean.
+- [x] **Phase C step 3 (REACH):** weighted ranking — `agents/ranking.jac`'s
+      `weighted_urgency`/`weighted_cluster_urgency`, `main.jac`'s `walker:pub set_weights`,
+      `get_queue` re-ranking against the repo's `Settings` at read time. Stored
+      `Issue.urgency`/`Cluster.urgency` untouched (ingest-time cascade always uses default
+      weights). Self-tested + live-smoke-tested.
+- [x] **This session's regression sweep:** found and fixed real compiler-breaking bugs introduced
+      by the 2:15/3:30 merge (connect-operator `[0]`-unwrap, invalid lambda syntax, a byllm import
+      path) that made `main.jac` fail to even compile/start on this machine. Re-verified with
+      direct repros (`git stash`/`pop`), not just re-reading old notes. Full detail in the 🚨
+      CRITICAL section below.
+- [x] **🛑 C4** (5:30): feature freeze — human confirmed to continue past this checkpoint. Person
+      1's own checks: `debug_blast` still gives 14 live; `seed/repo` confirmed fully
+      untracked/gitignored; tracked-byte Jac share ~50% locally as a proxy for the real GitHub bar.
+      **Per the checkpoint rule, Person 1 is now bugfixes-only — no new features unless something
+      is reported broken.**
+
+### 🔄 IN PROGRESS
+
+None. There is no partially-built Person 1 work in flight right now.
+
+### ⏳ WAITING ON OTHER PEOPLE / OTHER MACHINES (not something Person 1 can move forward alone)
+
+- [ ] **🛑 C5** (5:50): confirm Person 2 submitted the Devpost partial. **Waiting on:** Person 2
+      actually submitting, and the human confirming it happened — Person 1 has no endpoint or file
+      that touches this.
+- [ ] **`agents/clustering.test.jac`'s MockLLM tests still fail on this machine** (`IndexError`
+      deep inside the third-party `byllm==0.6.19` package's own `mtir.impl.jac`, reproduced in
+      isolation — not a bug in `clustering.jac`'s logic). **Waiting on:** the team settling on
+      which machine/environment is authoritative for the demo (see 🚨 CRITICAL section) — this
+      machine has no Ollama either, so the live LLM path can't be re-verified here at all, only the
+      non-LLM parts (`reindex_repo`/`debug_blast`/`get_queue`/`get_cluster_detail`/`reset_demo`,
+      all confirmed working). Not blocking the demo per se — Person 2 already verified the real
+      clustering logic live on a different, working machine.
+- [ ] **`jac test -d .` can't run as one command** — it crashes hard when it reaches
+      `seed/seed.jac`'s top-level HTTP calls with no server listening. **Waiting on:** Person 2
+      (owns `seed/`) if they want to make it test-runner-safe; not required for the demo itself,
+      only a convenience for whoever runs the test suite. Workaround: run test files individually.
+
+### ⬜ NOT STARTED
+
+None remaining in Person 1's scope. (There's no C6 checklist item for Person 1 in this plan — C6
+is Person 2's final Devpost submission and Person 3's screenshots/demo-preload work.)
+
+### 🚨 CRITICAL — cross-machine jaclang/byllm environment split found this session
+
+**Read this before anyone touches `main.jac`, `agents/clustering.jac`, or their tests again.**
+After pulling the merged `main` (commit `f140031`), `jac check main.jac` **failed to compile on
+this machine** with 3 real errors, and `jac test -d .` crashed outright. Root cause: this
+machine's `jaclang` (0.16.7, `pip show jaclang`) and `byllm` (0.6.19, a **standalone** pip
+package, NOT bundled inside jaclang) behave differently from whatever the team members who did
+the 2:15/3:30 merge fixes were running. Confirmed empirically (`jac run` on a 3-line repro, not
+guessed):
+
+1. **`root ++> Node(...)` and `x +>:edge:+> Node(...)` return `list[Node]` on this machine, not
+   the bare node.** The 5a0437d merge commit removed the `[0]` unwrap from `main.jac`'s
+   `reindex_repo` and `agents/clustering.jac`'s `maybe_cluster` based on the opposite finding on
+   someone else's machine. **Restored the `[0]` unwrap in both places** (plus every hand-built
+   test fixture in `main.test.jac` and `agents/clustering.test.jac` that had the same pattern) —
+   verified this makes `jac check main.jac` pass clean and all of Person 1's tests pass again.
+2. **The `lambda (c: ClusterView) { c.urgency; }` sort-key syntax from that same merge is invalid
+   Jac** (confirmed both by a `jac check` error — `E1054: No matching overload found` — and by
+   cross-checking the jac-mcp `functions-objects` doc's actual lambda grammar). Correct form:
+   `lambda c: ClusterView : c.urgency` (no parens around the param, single expression after a
+   space-colon — see doc §7). Fixed both sort calls in `get_queue`.
+3. **`import from jaclang.byllm.lib { MockLLM }` (the team's documented fix for the earlier byllm
+   incompatibility) doesn't exist on this machine** — `jaclang.byllm` isn't a module here at all;
+   `import from byllm.lib { MockLLM }` (the *original*, pre-fix import) is what actually resolves,
+   because this machine has the standalone `byllm` PyPI package installed instead of jaclang's
+   bundled copy. Reverted `agents/clustering.test.jac`'s import accordingly. **This is the exact
+   opposite of what `jac.toml`'s `[dependencies]` comment and the team's PLAN.md notes say** — do
+   not "fix" this back without first checking `pip show jaclang byllm` AND `jac --version`'s
+   "Plugins Detected" line on whichever machine is having trouble.
+4. **New issue, not yet resolved:** even with the import fixed, `agents/clustering.test.jac`'s
+   MockLLM-driven tests crash with `IndexError: list index out of range` deep inside
+   `byllm/impl/mtir.impl.jac`'s `factory()` (third-party code, not ours) — reproduced in isolation
+   with a trivial 3-arg-plus-`temperature=` `by llm()` function, so it looks like a genuine bug/
+   incompatibility in this machine's `byllm==0.6.19` build with that call shape, not a bug in
+   `clustering.jac`'s logic. **This machine has no Ollama installed at all**, so I could not
+   independently re-verify the live LLM-driven pipeline (clustering/severity/resolution) end to
+   end — I'm relying on Person 2's earlier live verification (real Ollama, real server) that the
+   actual clustering/ranking logic produces correct results. What I *did* verify live on this
+   machine, with no Ollama needed: `reindex_repo` (19 files incl. the test file, 27 edges),
+   `debug_blast` (`core/validation.py`→14, `models/product.py`→5), `get_queue` (empty-state shape
+   correct pre-ingest), `get_cluster_detail` (`{"ok": false, "error": "cluster not found"}` for a
+   bad id), `reset_demo` — all correct.
+5. Also: `jac start main.jac --no-client` (as written in Person 2's "standard rehydrate command"
+   below) **isn't a valid flag on this machine's jaclang** — it's `--no_client` / `-n`
+   (underscore, from `jac start --help`). Cosmetic compared to the above, but will block anyone
+   who copy-pastes that command on a similarly-configured machine.
+
+**Recommendation for the team, not yet acted on:** before the live demo, everyone should run
+`jac --version` (check "Plugins Detected") and `pip show jaclang byllm` on their own laptop and
+compare. Pick ONE laptop as the actual demo machine now and do a full clean-pipeline rehearsal
+(`reset_demo` → `jac run seed/seed.jac` → `get_queue`) on *that exact machine*, not whichever
+machine happened to verify C3 first — the fixes above suggest at least two genuinely different
+environments exist across the team right now, and code that passes `jac check` on one machine
+demonstrably fails to even compile on another.
+
+**Double-checked after the human reported a teammate's device runs the unfixed (pre-this-session)
+code successfully.** Re-verified rather than assuming my first pass was right:
+- `pip show jaclang byllm` on this machine: `jaclang==0.16.7`, standalone `byllm==0.6.19`.
+  Cross-checked against PyPI's actual JSON API (not the `pip index versions` CLI command, which
+  is flagged experimental and returned a stale/wrong list capped at `jaclang==0.10.2` — a red
+  herring, ignore that command): `pypi.org/pypi/jaclang/json` confirms `0.16.7` **is** the latest
+  published release, same for `byllm==0.6.19`. So this machine is not behind — there is no newer
+  public version to upgrade to, and downgrading to chase the teammate's behavior isn't the fix.
+- Did a direct repro: `git stash`'d every fix from this session, restored the exact merged
+  `main.jac`/`agents/clustering.jac`/test files, and ran `jac start main.jac --no_client` on this
+  machine. **It does not even start** — `Error loading main.jac: No module named 'jaclang.byllm'`
+  (the bad import in `clustering.test.jac` loads as an annex of `clustering.jac` even outside
+  `jac test`, so it takes the whole server down, not just the test suite). This is a hard,
+  reproducible crash on this machine, not a hypothetical or a static-check-only nitpick — `git
+  stash pop` restored the fix and the server started clean and served correct data again (see
+  verification below). Given this machine already has the newest public release of both packages,
+  the most likely explanation is the teammate's machine is on a **different, non-public build**
+  (a workshop-distributed pre-release/nightly, an editable git install, or simply a different
+  patch that predates a breaking change to the connect-operator return type) rather than this
+  machine being misconfigured. Either way: the fixes in this file stay, because they're the only
+  version of the code that runs *here*, and reverting them reproduces a proven crash.
 
 ### 📍 UPDATE from Person 2 (post-merge — read this before continuing Person 1 work)
+
+**⚠️ Superseded by the 🚨 CRITICAL section above, written later the same day on a different
+machine.** Points 1-3 below turned out to be *machine-specific*, not universal fixes — on the
+machine used for the session above, the exact opposite was empirically true (`jac check`/`jac
+run` proof included there): the connect operators DO return `list[T]` and need the `[0]` unwrap,
+the lambda syntax below is invalid, and `jaclang.byllm` doesn't exist so `byllm.lib` is the
+correct import. Point 4 (code-context fix for `assess_root_cause`) is unaffected and still stands.
+Keep reading both sections — they're not a contradiction to "resolve," they're evidence the team
+has at least two different jaclang/byllm environments. Don't re-flip these fixes without checking
+which machine you're actually on first (see the recommendation above).
 
 **Merged cleanly** — Person 2 pulled this Phase B+C push, resolved one conflict in `main.jac`
 (import list + `ingest_issue`/`generate_pr` sitting between your `reindex_repo`/`reset_demo`/
@@ -93,50 +233,62 @@ loads, e.g. via `jac start`). Fix: construct anything referencing base-module na
 `test { }` body, not at annex module scope — that executes fine. Keep this in mind for future
 `.test.jac` files using MockLLM.
 
-### 📍 RESUME HERE (last updated after Phase C steps 1-2)
+### 📍 RESUME HERE (last updated after pulling `f140031` and fixing the cross-machine regressions)
 
-**Exact code state right now:**
-- `graph/nodes.jac`, `integrations/ast_parser.jac`, `agents/blast_radius.jac` (Phase A),
-  `agents/clustering.jac` + `clustering.test.jac`, `agents/ranking.jac` + `ranking.test.jac`,
-  `main.jac` (`reindex_repo`/`reset_demo`/`debug_blast`/`get_queue`/`get_cluster_detail`),
-  `main.test.jac` — **all written and all of Person 1's tests passing locally, but NOT YET
-  COMMITTED beyond commit `199ffb4`** (Phase A only). Run `git status` on resume — expect
-  `main.jac`, `graph/nodes.jac`, `agents/blast_radius.jac`, `PLAN.md`, `CLAUDE.md` modified, plus
-  untracked `agents/clustering.jac`, `agents/clustering.test.jac`, `agents/ranking.jac`,
-  `agents/ranking.test.jac`, `main.test.jac`. Commit these before starting further work (ask the
-  human first, per repo convention — don't auto-commit). `CLAUDE.md`'s diff is whitespace-only
-  (JSON reformatting), not a contract change.
-- **Schema change to announce to the team:** `Cluster` gained a new field
-  `proposed_fix_summary: str = ""`, set by `clustering.jac`'s `maybe_cluster()` alongside
-  `root_cause_summary` (same `by llm()` call — `RootCauseGate` now returns both). This is
-  additive/backward-compatible (new field, existing fields untouched) and powers
-  `get_cluster_detail`'s `proposed_fix_summary` response field. Purely a Person 1 (P1) schema
-  decision per §9 ownership — announce it, don't need to re-litigate it.
-- **`get_cluster_detail`** (`main.jac`) is built and self-tested: reverse-BFS dependency graph
-  with `role` (`target`/`dependent`) + `hops`, edges in code direction restricted to the
-  reachable set, issue detail list (with `body`), `existing_pr` (null unless a `PullRequest`
-  `fixes`-edge exists), and a `{"ok": false, "error": "cluster not found"}` shape for a bad
-  `cluster_id`. New helper `build_dependency_graph(target: File) -> dict[str, list]` lives in
-  `agents/blast_radius.jac` (same file as `compute_blast_radius`, same reverse-BFS-over-incoming-
-  `imports` pattern — CLAUDE.md #4.3). **Person 3 is unblocked on this now** — tell the human to
-  notify Person 3 it's ready (originally scheduled for ~4:15, done earlier).
-- **Performance (Phase C step 2):** already satisfied — `get_queue` only reads cached
-  `File.blast_radius`, never recomputes. `get_cluster_detail` does one fresh BFS per call
-  (~18 nodes, sub-millisecond) since it's a click-triggered detail view, not the hot queue path.
-- `jac test -d .` results as of last run: everything of mine passes (`main.jac`: 3 tests —
-  `get_queue` e2e, `get_cluster_detail` happy path, `get_cluster_detail` unknown-id error;
-  `ranking.jac`: 4; `clustering.jac`: 2). `agents/triage_agent.jac` (Person 2's file) still fails
-  2 tests — expected, no local Ollama running, not a bug in their code.
-- Ran `jac format` on every file I touched this session (`main.jac`, `agents/blast_radius.jac`,
-  `agents/clustering.jac`, `graph/nodes.jac`, `agents/clustering.test.jac`, `main.test.jac`) —
-  note the command is `jac format`, not `jac fmt`. This reformatted whole-file whitespace on
-  `main.jac` (multi-line call args, spacing around `->`/`<-` etc.) — CLAUDE.md #9 warns against
-  reformatting the whole shared file to avoid merge conflicts; flag this to the human so
-  Person 2/3 know to expect whitespace-only diff noise in `main.jac` on their next pull, on top
-  of the new `get_cluster_detail` walker.
-- The Jac MCP server is installed and registered (`claude mcp add jac -- jac mcp`, shows
-  `✔ Connected`) and was used this session for syntax/pattern verification
-  (`jid()` confirmed as a language builtin, no import needed).
+**Read the 🚨 CRITICAL section above first if you haven't.** Short version: pulled the full
+merged `main` (Person 2's ingestion + Person 3's client, commit `f140031`), found `main.jac`
+didn't even compile on this machine, root-caused it to a genuine jaclang/byllm environment
+difference from whoever did the merge, and fixed the actual regressions (not just papered over
+them) — verified via `jac check`, `jac test`, and a live `jac start` server hitting the real seed
+repo.
+
+**Exact code state right now (all uncommitted — ask the human before committing, per convention):**
+- `main.jac`: restored `[0]` unwrap on `reindex_repo`'s `repo = (root ++> Repo(...))[0]`; fixed
+  both `get_queue` sort-key lambdas to `lambda x: Type : expr` syntax.
+- `agents/clustering.jac`: restored `[0]` unwrap on `maybe_cluster`'s
+  `cluster = (repos[0] +>:owns:+> Cluster(...))[0]`.
+- `agents/clustering.test.jac`: reverted the `MockLLM` import from `jaclang.byllm.lib` back to
+  `byllm.lib`; added back `[0]` unwrap on the hand-built `File`/`Issue` fixtures in both tests.
+- `main.test.jac`: added back `[0]` unwrap on every hand-built `Repo`/`File`/`Issue`/`Cluster`/
+  `Unresolved` fixture in both `get_queue` and `get_cluster_detail` tests.
+- `PLAN.md`: this section plus the 🚨 CRITICAL section above and the annotation on Person 2's
+  now-superseded merge notes.
+- **Not changed:** `get_cluster_detail`'s own logic, `build_dependency_graph`, the
+  `proposed_fix_summary` schema field, `ranking.jac` — all untouched by this session, all still
+  passing.
+
+**Verification performed this session:**
+- `jac check main.jac` — passes clean (was 3 errors before the fixes above).
+- `jac test main.test.jac` — 3/3 pass. `jac test agents/ranking.test.jac` — 2/2 pass.
+- `jac test agents/clustering.test.jac` — **still fails** (2 errors), but NOT from the `[0]`
+  regression — see 🚨 point 4 above (a suspected `byllm==0.6.19` internal bug on this machine,
+  reproduced in isolation, unrelated to our code). Not fixed this session; needs either a byllm
+  version change or testing on a machine with the bundled `jaclang.byllm` instead.
+- `jac test -d .` **cannot be run as a single command right now** — it walks into
+  `seed/seed.jac`, which has top-level `with entry` code that makes real HTTP calls and hard-
+  crashes the whole batch run when no server is listening (not a test file, shouldn't be swept
+  into `-d .`; flagging for Person 2 since they own `seed/`, not fixing it myself since it's
+  outside my ownership and low-priority vs. the compile-blocking bugs). **Workaround: test files
+  individually** (`jac test <path>`) until that's addressed.
+- Live server check (`jac start main.jac --no_client`, then `reset_demo`'d clean afterward):
+  `reindex_repo` → 19 files (18 real + `tests/test_smoke.py`), 27 import edges; `debug_blast` →
+  `core/validation.py`=14, `models/product.py`=5 (both match the reference table exactly);
+  `get_queue` → correct empty-state shape pre-ingest; `get_cluster_detail` → correct
+  `{"ok": false, "error": "cluster not found"}` for a bad id. Could not test `ingest_issue`/
+  `seed.jac` live myself — no Ollama installed on this machine, and `assess_severity`/
+  `estimate_diff_size` run unconditionally in `ingest_issue` regardless of resolution method, so
+  every ingestion needs a working LLM backend.
+- The Jac MCP server (`jac-mcp`, `✔ Connected`) was used to pull the actual lambda grammar
+  (`functions-objects` doc, §7) rather than guessing — worth reaching for again if another
+  syntax disagreement like this comes up.
+
+**Not yet started:** the reach weighted-ranking feature (`Settings` node already exists in
+`graph/nodes.jac` from an earlier session as a schema stub; no `set_weights` walker, and
+`ranking.jac` still uses the fixed `W_BLAST`/`W_SEV`/`W_DIFF` constants only). PLAN.md's own cut
+list puts personalization/weights first to cut if behind — given the environment issues above ate
+this session's time budget, recommend treating C4 feature-freeze prep (re-verify the pipeline on
+whichever machine is the real demo machine, confirm ≥40% Jac) as higher priority than starting
+this reach feature, but that's the human's call.
 
 **⚠️ Contract Person 2's `ingest_issue` MUST follow (this was inferred/decided by Person 1
 while building Phase B, since `ingest_issue` doesn't exist yet — confirm with Person 2 before

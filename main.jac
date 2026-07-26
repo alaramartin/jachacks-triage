@@ -9,6 +9,7 @@ import from graph.nodes {
     Cluster,
     PullRequest,
     Unresolved,
+    Settings,
     owns,
     resolves_to,
     parked,
@@ -19,7 +20,11 @@ import from graph.nodes {
 import from integrations.ast_parser { build_code_substrate, count_import_edges }
 import from agents.blast_radius { compute_blast_radius, build_dependency_graph }
 import from agents.triage_agent { resolve_issue, assess_severity, estimate_diff_size }
-import from agents.ranking { on_issue_resolved }
+import from agents.ranking {
+    on_issue_resolved,
+    weighted_urgency,
+    weighted_cluster_urgency
+}
 import from integrations.github { create_pull_request }
 
 # ============================== Person 1 — Graph & Agents ==============================
@@ -33,7 +38,7 @@ walker:pub reindex_repo {
         if len(existing) > 0 {
             repo = existing[0];
         } else {
-            repo = root ++> Repo(full_name=self.full_name);
+            repo = (root ++> Repo(full_name=self.full_name))[0];
         }
 
         already_indexed: list[File] = [repo->:owns:->][?:File];
@@ -92,7 +97,6 @@ walker:pub debug_blast {
 }
 
 # ======================= Person 2 — Ingestion, LLM & PR action =======================
-
 walker:pub ingest_issue {
     has external_id: str;
     has title: str;
@@ -102,20 +106,22 @@ walker:pub ingest_issue {
     has comment_velocity: int = 0;
 
     can ingest with Root entry {
-        repos: list[Repo] = [root -->][?:Repo];
+        repos: list[Repo] = [root-->][?:Repo];
         if len(repos) == 0 {
             report {"ok": False, "error": "no repo indexed - call reindex_repo first"};
             disengage;
         }
         repo: Repo = repos[0];
 
-        files: list[File] = [repo ->:owns:->][?:File];
+        files: list[File] = [repo->:owns:->][?:File];
         file_paths: list[str] = [f.path for f in files];
 
         # TODO(P1): once Repo stores the on-disk repo_path it was indexed from,
         # pass that through instead of this seed-demo convention (also used as
         # the reindex_repo request's repo_path throughout CLAUDE.md #6).
-        resolution = resolve_issue(self.title, self.body, file_paths, repo_root="seed/repo");
+        resolution = resolve_issue(
+            self.title, self.body, file_paths, repo_root="seed/repo"
+        );
         severity: int = assess_severity(self.title, self.body);
         diff_lines: int = estimate_diff_size(self.title, self.body);
 
@@ -134,7 +140,7 @@ walker:pub ingest_issue {
         repo +>:owns:+> issue;
 
         if resolution.path is None {
-            unresolved_matches: list[Unresolved] = [repo ->:owns:->][?:Unresolved];
+            unresolved_matches: list[Unresolved] = [repo->:owns:->][?:Unresolved];
             unresolved: Unresolved;
             if len(unresolved_matches) > 0 {
                 unresolved = unresolved_matches[0];
@@ -153,7 +159,11 @@ walker:pub ingest_issue {
             disengage;
         }
 
-        target_matches: list[File] = [f for f in files if f.path == resolution.path];
+        target_matches: list[File] = [
+            f
+            for f in files
+            if f.path == resolution.path
+        ];
         target: File = target_matches[0];
         issue +>:resolves_to:+> target;
 
@@ -164,7 +174,7 @@ walker:pub ingest_issue {
         on_issue_resolved(issue, target, repo);
 
         clustered_into: str | None = None;
-        issue_clusters: list[Cluster] = [issue ->:grouped_in:->];
+        issue_clusters: list[Cluster] = [issue->:grouped_in:->];
         if len(issue_clusters) > 0 {
             clustered_into = issue_clusters[0].cluster_key;
         }
@@ -200,14 +210,14 @@ walker:pub generate_pr {
             disengage;
         }
 
-        repos: list[Repo] = [root -->][?:Repo];
+        repos: list[Repo] = [root-->][?:Repo];
         if len(repos) == 0 {
             report {"ok": False, "error": "no repo indexed"};
             disengage;
         }
         repo: Repo = repos[0];
 
-        targets: list[File] = [cluster ->:cluster_targets:->][?:File];
+        targets: list[File] = [cluster->:cluster_targets:->][?:File];
         target_path: str = cluster.cluster_key;
         if len(targets) > 0 {
             target_path = targets[0].path;
@@ -246,7 +256,6 @@ walker:pub generate_pr {
 }
 
 # ======================= Person 1 — Queue + Cluster Detail (Phase B/C) =======================
-
 obj IssueSummary {
     has id: str;
     has external_id: str;
@@ -313,6 +322,20 @@ walker:pub get_queue {
         all_issues: list[Issue] = [repo->:owns:->][?:Issue];
         all_clusters: list[Cluster] = [repo->:owns:->][?:Cluster];
 
+        # (REACH, PLAN.md Phase C step 3) Read-time re-rank against the repo's
+        # current Settings - defaults to the locked blast-dominant weights if
+        # set_weights was never called. Never touches the stored Issue/Cluster
+        # .urgency (that stays whatever the ingest-time cascade wrote), so the
+        # demo's default numbers are unaffected unless a viewer moves sliders.
+        settings_matches: list[Settings] = [repo->:owns:->][?:Settings];
+        settings: Settings = settings_matches[0]
+            if len(settings_matches) > 0
+            else Settings();
+        max_reactions: int = max([i.reactions for i in all_issues], default=0);
+        max_comment_velocity: int = max(
+            [i.comment_velocity for i in all_issues], default=0
+        );
+
         cluster_views: list[ClusterView] = [];
         clustered_issue_ids: set[str] = set();
 
@@ -337,6 +360,16 @@ walker:pub get_queue {
                     )
                 );
             }
+            cluster_urgency: float = weighted_cluster_urgency(
+                c.blast_radius,
+                members,
+                repo.file_count,
+                max_reactions,
+                max_comment_velocity,
+                settings
+            )
+                if len(members) > 0
+                else c.urgency;
             cluster_views.append(
                 ClusterView(
                     id=jid(c),
@@ -345,13 +378,13 @@ walker:pub get_queue {
                     blast_radius=c.blast_radius,
                     issue_count=c.issue_count,
                     max_severity=max_sev,
-                    urgency=c.urgency,
+                    urgency=cluster_urgency,
                     fix_confidence=c.fix_confidence,
                     issues=issue_views
                 )
             );
         }
-        cluster_views.sort(key=lambda (c: ClusterView) { c.urgency; }, reverse=True);
+        cluster_views.sort(key=lambda c: ClusterView : c.urgency, reverse=True);
 
         singleton_views: list[SingletonView] = [];
         unresolved_views: list[UnresolvedView] = [];
@@ -362,6 +395,17 @@ walker:pub get_queue {
             }
             resolved: list[File] = [i->:resolves_to:->];
             if len(resolved) > 0 {
+                singleton_urgency: float = weighted_urgency(
+                    resolved[0].blast_radius,
+                    i.severity,
+                    i.estimated_diff_lines,
+                    i.reactions,
+                    i.comment_velocity,
+                    repo.file_count,
+                    max_reactions,
+                    max_comment_velocity,
+                    settings
+                );
                 singleton_views.append(
                     SingletonView(
                         id=jid(i),
@@ -370,7 +414,7 @@ walker:pub get_queue {
                         target_path=resolved[0].path,
                         blast_radius=resolved[0].blast_radius,
                         severity=i.severity,
-                        urgency=i.urgency,
+                        urgency=singleton_urgency,
                         resolution_method=i.resolution_method
                     )
                 );
@@ -380,7 +424,7 @@ walker:pub get_queue {
                 );
             }
         }
-        singleton_views.sort(key=lambda (s: SingletonView) { s.urgency; }, reverse=True);
+        singleton_views.sort(key=lambda s: SingletonView : s.urgency, reverse=True);
 
         report QueueResponse(
             repo=repo.full_name,
@@ -389,6 +433,48 @@ walker:pub get_queue {
             singletons=singleton_views,
             unresolved=unresolved_views
         );
+    }
+}
+
+# (REACH, PLAN.md Phase C step 3) Writes the repo's personalization weights;
+# get_queue re-ranks its response against whatever is stored here. The
+# ingest-time cascade (on_issue_resolved) never reads this - the demo's
+# stored urgency stays blast-dominant-by-default regardless of slider state.
+walker:pub set_weights {
+    has full_name: str;
+    has w_blast: float = 6.0;
+    has w_sev: float = 3.0;
+    has w_diff: float = 1.0;
+    has w_reactions: float = 0.0;
+    has w_comment_velocity: float = 0.0;
+
+    can build with Root entry {
+        matches: list[Repo] = [root-->][?:Repo, full_name==self.full_name];
+        if len(matches) == 0 {
+            report {"ok": False, "error": "no repo indexed - call reindex_repo first"};
+            disengage;
+        }
+        repo: Repo = matches[0];
+
+        settings_matches: list[Settings] = [repo->:owns:->][?:Settings];
+        settings: Settings = settings_matches[0]
+            if len(settings_matches) > 0
+            else (repo +>:owns:+> Settings())[0];
+
+        settings.w_blast = self.w_blast;
+        settings.w_sev = self.w_sev;
+        settings.w_diff = self.w_diff;
+        settings.w_reactions = self.w_reactions;
+        settings.w_comment_velocity = self.w_comment_velocity;
+
+        report {
+            "ok": True,
+            "w_blast": settings.w_blast,
+            "w_sev": settings.w_sev,
+            "w_diff": settings.w_diff,
+            "w_reactions": settings.w_reactions,
+            "w_comment_velocity": settings.w_comment_velocity
+        };
     }
 }
 
@@ -486,7 +572,6 @@ walker:pub get_cluster_detail {
 }
 
 # ======================= Person 3 — Client entry point =======================
-
 cl {
     import ".client/global.css";
     import from .client.app { app as ClientApp }
