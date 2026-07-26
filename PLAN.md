@@ -45,6 +45,16 @@ demo always runs on the blast-radius-dominant default.
 
 ## ✅ Person 1 master checklist
 
+> ## 🟢 PERSON 1 IS 100% CODE-COMPLETE (updated at the P1+P2 merge)
+>
+> **Every technical item in Person 1's scope is done and verified live on the demo machine.**
+> The two items that were previously blocked/waiting are both now RESOLVED (see below) — the
+> environment split is settled, `clustering.test.jac` passes, and `jac test -d .` runs the whole
+> suite in one command (35 passed, 0 failed).
+>
+> **The only thing left with Person 1's name on it is 🛑 C5** — confirming Person 2 submitted the
+> Devpost partial. That is a human coordination step, not code. **Nothing left to build.**
+
 **Bottom line: everything in Person 1's scope that can be done independently IS done.** Every
 remaining item is either a coordination step for the human or blocked on something outside
 Person 1's owned files. See the four buckets below — this is the authoritative status, re-derived
@@ -91,18 +101,18 @@ None. There is no partially-built Person 1 work in flight right now.
 - [ ] **🛑 C5** (5:50): confirm Person 2 submitted the Devpost partial. **Waiting on:** Person 2
       actually submitting, and the human confirming it happened — Person 1 has no endpoint or file
       that touches this.
-- [ ] **`agents/clustering.test.jac`'s MockLLM tests still fail on this machine** (`IndexError`
-      deep inside the third-party `byllm==0.6.19` package's own `mtir.impl.jac`, reproduced in
-      isolation — not a bug in `clustering.jac`'s logic). **Waiting on:** the team settling on
-      which machine/environment is authoritative for the demo (see 🚨 CRITICAL section) — this
-      machine has no Ollama either, so the live LLM path can't be re-verified here at all, only the
-      non-LLM parts (`reindex_repo`/`debug_blast`/`get_queue`/`get_cluster_detail`/`reset_demo`,
-      all confirmed working). Not blocking the demo per se — Person 2 already verified the real
-      clustering logic live on a different, working machine.
-- [ ] **`jac test -d .` can't run as one command** — it crashes hard when it reaches
-      `seed/seed.jac`'s top-level HTTP calls with no server listening. **Waiting on:** Person 2
-      (owns `seed/`) if they want to make it test-runner-safe; not required for the demo itself,
-      only a convenience for whoever runs the test suite. Workaround: run test files individually.
+- [x] ~~**`agents/clustering.test.jac`'s MockLLM tests still fail on this machine**~~ — **RESOLVED
+      at the P1+P2 merge.** This was environment-specific (the standalone `byllm==0.6.19`'s
+      `mtir.impl.jac`), not a logic bug. On the authoritative demo machine, with the import back to
+      `jaclang.byllm.lib`, both tests pass (`jac test agents/clustering.test.jac` → 2 passed).
+- [x] ~~**`jac test -d .` can't run as one command**~~ — **FIXED by Person 2.** Root cause was
+      `seed/seed.jac` using a plain `with entry`, which executes on *every import* — so the test
+      runner fired its HTTP calls during collection. Worse than originally diagnosed: with no
+      server it crashed the suite, but **with a server running it silently re-ingested all 20
+      issues into the live graph** (observed: 28 issues instead of 20). Changed to
+      `with entry:__main__`, so seeding is now an explicit `jac run seed/seed.jac` action only.
+      **`jac test -d .` now runs the whole suite in one command: 35 passed, 0 failed**, and the
+      graph is verifiably untouched afterward.
 
 ### ⬜ NOT STARTED
 
@@ -514,6 +524,16 @@ _(validation.py coming out 0/1/6 = wrong traversal direction, CLAUDE.md §4.3.)_
 - [ ] **🛑 C6** (6:45–7:15): final submission — human action, not code.
 - [x] _(reach)_ `reactions`/`comment_velocity` data — already in `seed/issues.json` and ingested (done early, folded into Phase A). The only remaining reach piece (actually *weighting* ranking by these) is Person 1's `Settings` node/formula work, not Person 2's — skip tracking it here.
 
+> ## 🟢 PERSON 2 IS 100% CODE-COMPLETE (updated at the P1+P2 merge)
+>
+> **Every technical item in Person 2's scope is done and verified live against the merged code.**
+> Re-verified this session: real PR #3 opened end-to-end, all 20 issues ingest, and the last open
+> P2 item (`seed/seed.jac` breaking `jac test -d .`) is fixed via `with entry:__main__`.
+>
+> **The only things left with Person 2's name on them are 🛑 C5 and 🛑 C6** — the Devpost partial
+> and final submission. Both are human actions (Devpost forms, demo video, screenshots), not code.
+> **Nothing left to build.**
+
 **Person 2's code work is DONE.** Only C5/C6 remain, and those are human submission actions (Devpost, screenshots, demo video), not code.
 
 ### 📍 RESUME HERE (Person 2, DONE — only C5/C6 human submission steps remain)
@@ -739,9 +759,13 @@ Then:
    be real and mentionable in the pitch, not to visibly move the demo ranking). Skip entirely if
    we're behind. → Data already present/ingested; actual ranking-weight usage is Person 1's side.
 
-**Self-test:** `generate_pr` on cluster A's id → real PR on GitHub. **[~] IN PROGRESS** — succeeded
-once (PR #1, since closed for a code-quality bug, see RESUME HERE above), currently blocked on
-retesting with `qwen2.5-coder:7b` to fix an LLM output-truncation issue in the fix generator.
+**Self-test:** `generate_pr` on cluster A's id → real PR on GitHub. **[x] PASSED** — re-verified
+against the fully merged code at the P1+P2 merge: **PR #3**,
+https://github.com/alaramartin/triage-demo/pull/3 — opened on the top cluster (`core/validation.py`),
++8/−7 on one file, the committed Python compiles cleanly (syntax gate never had to fall back), and
+the PR body carries the root cause, "reached by **14 of 18 files**", and all 4 linked issues.
+Confirmed the full round trip: `generate_pr` writes the `PullRequest` node → Person 1's
+`get_cluster_detail` reads it back as `existing_pr`.
 
 **🛑 CHECKPOINT C3 (3:30) — real-data integration.** Print to human and wait:
 

@@ -28,7 +28,13 @@ def _post(path: str, payload: dict) -> dict {
     return envelope;
 }
 
-with entry {
+# `entry:__main__`, NOT a plain `entry`: a plain entry block runs on every
+# import, which means `jac test -d .` executes this file's HTTP calls during
+# collection. With no server up that crashes the whole suite; with a server up
+# it is worse - it silently re-ingests all 20 issues into the LIVE graph and
+# leaves you with duplicates. Guarding it makes the suite runnable as one
+# command and makes seeding an explicit `jac run seed/seed.jac` action.
+with entry:__main__ {
     fh = open("seed/issues.json", "r");
     issues: list[dict] = json.load(fh);
     fh.close();
