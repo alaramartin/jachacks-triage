@@ -21,6 +21,13 @@ react-dom = "^18.2.0"
 react-router-dom = "^6.22.0"
 react-error-boundary = "^5.0.0"
 react-hook-form = "^7.71.0"
+# Required by jac 0.34.7's GENERATED client runtime, which does an
+# unconditional `import { useForm } from "@tanstack/react-form"` in
+# client_runtime.js - none of our own client code uses forms. Without it
+# Vite fails to resolve the dep and the browser shows
+# "Failed to fetch dynamically imported module: /compiled/_entry.js",
+# i.e. a blank app with only an error overlay. Do not remove.
+"@tanstack/react-form" = "^1.33.2"
 zod = "^4.3.6"
 "@hookform/resolvers" = "^5.2.2"
 

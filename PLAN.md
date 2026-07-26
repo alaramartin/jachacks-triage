@@ -976,6 +976,20 @@ plan and CLAUDE.md both name as the first thing to cut.
 - **The API port depends on the mode.** `--no-client` → API on **8000**. `--dev` → app on
   **8000**, API on **8001**. `seed/seed.jac` defaults to 8000; for a `--dev` server run
   `TRIAGE_API=http://localhost:8001 jac run seed/seed.jac`.
+- **The client needs `@tanstack/react-form` in `jac.toml`.** jac 0.34.7's GENERATED
+  `client_runtime.js` does an unconditional `import { useForm } from "@tanstack/react-form"`
+  even though none of our client code uses forms. If it is missing, the backend looks fine and
+  `curl /` even returns 200 (that is just Vite's HTML shell), but the browser shows
+  **"[plugin:jac-error-reporter] Failed to fetch dynamically imported module: /compiled/_entry.js"**
+  and a blank app. Fixed in `jac.toml`. To verify the client for real, curl the MODULES, not `/`:
+  `curl -o /dev/null -w "%{http_code}" http://localhost:8000/compiled/_entry.js` (and
+  `/compiled/main.js`, `/compiled/client_runtime.js`) - all must be 200.
+- **`pkill -f "jac start"` does NOT stop the frontend.** Vite runs under a separate `bun`
+  process that survives, keeps holding port 8000, and the next `jac start` silently bumps the
+  app to 8002, 8003, ... while you keep browsing the OLD, stale build on 8000. This is how a
+  fixed bug can look unfixed. Always kill both and confirm the port is free:
+  `pkill -f "jac start"; pkill -f bun; lsof -nP -iTCP:8000 -sTCP:LISTEN`
+  Then check the startup banner actually says `App: http://localhost:8000/`.
 - **Seeding takes a few minutes** (20 sequential local-LLM ingests). Seed *before* the judges are
   watching, and never re-seed without `reset_demo` first or you get duplicate issues.
 
