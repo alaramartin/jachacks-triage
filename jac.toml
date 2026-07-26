@@ -1,7 +1,7 @@
 [project]
 name = "triage"
 version = "0.1.0"
-description = "Triage — a structural, graph-native lens on the GitHub issue queue."
+description = "Triage - a structural, graph-native lens on the GitHub issue queue."
 entry-point = "main.jac"
 kind = "fullstack"
 
@@ -14,6 +14,8 @@ kind = "fullstack"
 # a byllm/*.jac traceback, check here first before touching Ollama/API keys.
 
 [dependencies.npm]
+tailwindcss = "^4.0.0"
+"@tailwindcss/vite" = "^4.0.0"
 react = "^18.2.0"
 react-dom = "^18.2.0"
 react-router-dom = "^6.22.0"
@@ -34,6 +36,10 @@ base_route_app = "app"
 port = 8000
 
 [client]
+
+[plugins.client.vite]
+plugins = ["tailwindcss()"]
+lib_imports = ["import tailwindcss from '@tailwindcss/vite'"]
 
 # Single place the whole team configures the LLM (CLAUDE.md #7: "Don't scatter
 # model names"). Verified against jac-config docs + a live jac test run:

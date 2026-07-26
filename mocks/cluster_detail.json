@@ -1,0 +1,103 @@
+{
+  "id": "n:Cluster:mock-validation",
+  "title": "require_fields() crashes on None and non-ASCII input",
+  "root_cause_summary": "All five reports trace to core/validation.py: require_fields() has no None check, so str(None) == \"None\" silently passes as a non-empty value and downstream code crashes calling .strip() on None; normalize_text() slices encoded UTF-8 bytes instead of characters, corrupting or truncating any multi-byte text (emoji, accents, non-Latin scripts).",
+  "target_path": "core/validation.py",
+  "blast_radius": 14,
+  "urgency": 7.22,
+  "fix_confidence": 0.86,
+  "proposed_fix_summary": "Add a None guard in require_fields() before the length check, and normalize_text() should slice on decoded characters (or use a grapheme-safe truncation) instead of raw UTF-8 bytes.",
+  "issues": [
+    {
+      "id": "n:Issue:seed-01",
+      "external_id": "SEED-01",
+      "title": "Crash when submitting checkout form",
+      "body": "Traceback (most recent call last):\n  File \"api/routes_orders.py\", line 41, in create_order\n  File \"services/orders.py\", line 22, in place_order\n  File \"models/order.py\", line 15, in validate\n  File \"core/validation.py\", line 12, in require_fields\nAttributeError: 'NoneType' object has no attribute 'strip'",
+      "severity": 9,
+      "resolution_method": "explicit"
+    },
+    {
+      "id": "n:Issue:seed-02",
+      "external_id": "SEED-02",
+      "title": "Product names with emoji get silently truncated",
+      "body": "I named a product \"🚀 Rocket Mug\" and after saving it shows up as \"🚀 Rocket M\" in the catalog. Doesn't happen with plain ASCII names.",
+      "severity": 5,
+      "resolution_method": "llm"
+    },
+    {
+      "id": "n:Issue:seed-03",
+      "external_id": "SEED-03",
+      "title": "Signup fails for international phone numbers",
+      "body": "Tried to sign up with my UK number \"+44 7911 123456\" and the form says the phone field is required, even though I typed it in. Works fine with US numbers.",
+      "severity": 7,
+      "resolution_method": "llm"
+    },
+    {
+      "id": "n:Issue:seed-04",
+      "external_id": "SEED-04",
+      "title": "TypeError: expected str, got NoneType on order save",
+      "body": "Traceback (most recent call last):\n  File \"models/order.py\", line 18, in save\n  File \"core/validation.py\", line 12, in require_fields\nTypeError: expected str, got NoneType",
+      "severity": 9,
+      "resolution_method": "explicit"
+    },
+    {
+      "id": "n:Issue:seed-05",
+      "external_id": "SEED-05",
+      "title": "CSV export skips rows with blank fields",
+      "body": "Exporting orders to CSV, any row that had an empty shipping note just vanishes from the export entirely instead of showing up with a blank cell.",
+      "severity": 6,
+      "resolution_method": "llm"
+    }
+  ],
+  "graph": {
+    "nodes": [
+      { "id": "core/validation.py", "label": "core/validation.py", "role": "target" },
+      { "id": "core/config.py", "label": "core/config.py", "role": "neutral" },
+      { "id": "core/errors.py", "label": "core/errors.py", "role": "neutral" },
+      { "id": "utils/logging.py", "label": "utils/logging.py", "role": "neutral" },
+      { "id": "core/db.py", "label": "core/db.py", "role": "dependent", "hops": 1 },
+      { "id": "models/order.py", "label": "models/order.py", "role": "dependent", "hops": 1 },
+      { "id": "models/user.py", "label": "models/user.py", "role": "dependent", "hops": 1 },
+      { "id": "models/product.py", "label": "models/product.py", "role": "dependent", "hops": 1 },
+      { "id": "models/cart.py", "label": "models/cart.py", "role": "dependent", "hops": 1 },
+      { "id": "services/upload.py", "label": "services/upload.py", "role": "dependent", "hops": 1 },
+      { "id": "services/orders.py", "label": "services/orders.py", "role": "dependent", "hops": 2 },
+      { "id": "services/users.py", "label": "services/users.py", "role": "dependent", "hops": 2 },
+      { "id": "services/inventory.py", "label": "services/inventory.py", "role": "dependent", "hops": 2 },
+      { "id": "services/pricing.py", "label": "services/pricing.py", "role": "dependent", "hops": 2 },
+      { "id": "utils/csv_export.py", "label": "utils/csv_export.py", "role": "dependent", "hops": 2 },
+      { "id": "api/routes_admin.py", "label": "api/routes_admin.py", "role": "dependent", "hops": 2 },
+      { "id": "api/routes_orders.py", "label": "api/routes_orders.py", "role": "dependent", "hops": 3 },
+      { "id": "api/routes_users.py", "label": "api/routes_users.py", "role": "dependent", "hops": 3 }
+    ],
+    "edges": [
+      { "from": "core/db.py", "to": "core/validation.py" },
+      { "from": "models/order.py", "to": "core/validation.py" },
+      { "from": "models/order.py", "to": "core/db.py" },
+      { "from": "models/order.py", "to": "core/errors.py" },
+      { "from": "models/user.py", "to": "core/validation.py" },
+      { "from": "models/user.py", "to": "core/db.py" },
+      { "from": "models/product.py", "to": "core/validation.py" },
+      { "from": "models/product.py", "to": "core/db.py" },
+      { "from": "models/cart.py", "to": "models/product.py" },
+      { "from": "models/cart.py", "to": "core/validation.py" },
+      { "from": "services/orders.py", "to": "models/order.py" },
+      { "from": "services/orders.py", "to": "core/errors.py" },
+      { "from": "services/users.py", "to": "models/user.py" },
+      { "from": "services/inventory.py", "to": "models/product.py" },
+      { "from": "services/inventory.py", "to": "core/db.py" },
+      { "from": "services/pricing.py", "to": "models/cart.py" },
+      { "from": "services/pricing.py", "to": "models/product.py" },
+      { "from": "services/upload.py", "to": "core/validation.py" },
+      { "from": "services/upload.py", "to": "core/config.py" },
+      { "from": "api/routes_orders.py", "to": "services/orders.py" },
+      { "from": "api/routes_orders.py", "to": "services/pricing.py" },
+      { "from": "api/routes_users.py", "to": "services/users.py" },
+      { "from": "api/routes_admin.py", "to": "services/inventory.py" },
+      { "from": "api/routes_admin.py", "to": "services/upload.py" },
+      { "from": "utils/logging.py", "to": "core/config.py" },
+      { "from": "utils/csv_export.py", "to": "models/order.py" }
+    ]
+  },
+  "existing_pr": null
+}

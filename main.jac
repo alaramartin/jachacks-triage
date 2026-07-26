@@ -484,3 +484,14 @@ walker:pub get_cluster_detail {
         report {"ok": False, "error": "cluster not found"};
     }
 }
+
+# ======================= Person 3 — Client entry point =======================
+
+cl {
+    import ".client/global.css";
+    import from .client.app { app as ClientApp }
+
+    def:pub app -> JsxElement {
+        return <ClientApp/>;
+    }
+}
