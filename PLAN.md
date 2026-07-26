@@ -630,8 +630,8 @@ until 3:30.**
 - [x] **🛑 C1** (~12:45): confirm API shapes unchanged — confirmed post-hoc, only the `from_file`/`to_file` vs `from`/`to` edge-key difference noted below.
 - [x] **🛑 C2** (2:15): merge LAST; confirm build is clean — merged `p3/client` → `main`, `jac check main.jac` passes clean.
 - [x] **Phase B:** cluster detail page → graph visualization → wire Generate PR button (now on live data, see below)
-- [x] **🛑 C3** (3:30): swap mocks → live data; full click-through works — **DONE.** All three screens now call the real `get_queue`/`get_cluster_detail`/`generate_pr` walkers; verified via direct API-shape checks against a small live-seeded graph (not the full 20-issue pipeline - see wiring note below).
-- [ ] **Phase C:** live cluster detail (done) → polish (started) → rehearse ≥3× → record video → _(reach)_ weights panel
+- [x] **🛑 C3** (3:30): swap mocks → live data; full click-through works — **DONE and browser-verified** (not just curl'd JSON): real seeded cluster/singleton/unresolved data rendered correctly through every screen incl. Generate PR and the graph view, zero console errors, after fixing 5 bugs that were actually blocking the server from starting at all (see update below). Still on a small hand-seeded graph, not the full 20-issue pipeline (needs Ollama + real `seed/repo/`, neither available on this machine).
+- [ ] **Phase C:** live cluster detail (done) → polish (in progress: accessibility, mobile responsiveness, hard-coded label bug all fixed) → rehearse ≥3× → record video → _(reach)_ weights panel
 - [ ] **🛑 C4** (5:30): feature freeze; video recorded
 - [ ] **🛑 C5** (5:50): confirm Person 2 submitted the partial
 - [ ] **🛑 C6** (6:45–7:15): final screenshots; demo pre-loaded
@@ -742,6 +742,68 @@ resolution `ingest_issue` calls (fast, no LLM calls needed) to get one real clus
 what each screen's conversion code reads. All matched exactly. `jac check main.jac` (whole app,
 server + client) passes clean. This is the pattern to reuse for future small client/backend
 wiring fixes - full pipeline reseed only before an actual checkpoint or the real demo rehearsal.
+
+### 📍 UPDATE — pulled `main`, the server didn't actually start (fixed), then verified live in a real browser
+
+Picked this branch back up after pulling the merge above. **The `jac check` in the note just above
+was clean, but the actual dev server would not start at all** - `jac start main.jac --dev` failed
+immediately with `No module named 'jaclang.byllm'` before ever reaching the client. `jac check`
+never catches this class of bug (same lesson as the earlier `obj`/`new` client bug): it type-checks,
+it doesn't execute the module graph the way `jac start`/`jac run` does. Found and fixed **five real
+bugs**, all now verified against a genuinely fresh `jac start --dev` + a real headless-browser
+click-through with **real seeded graph data** (not just curl'd JSON):
+
+1. **`agents/clustering.test.jac`** imported `from jaclang.byllm.lib` instead of `from byllm.lib`.
+   `.test.jac` files auto-merge into their base module at compile time (even outside `jac test`), so
+   this one bad import in a *test* file broke importing `agents.clustering` for the entire live
+   app - `main.jac` → `agents.ranking` → `agents.clustering` → boom. Root-caused by bisecting with
+   throwaway scratch `.jac` files until the exact trigger (the test file's own import) was isolated.
+2. **`jac.toml`'s `[byllm.model]` section was wrong again** (flipped back from a previous fix,
+   apparently by someone re-"verifying" it the other way). Settled for good this time by reading
+   `byllm`'s own bundled `config_loader.jac` docstring directly and empirically confirming with a
+   throwaway `get_byllm_config()` script that `[plugins.byllm.model]` resolves and a bare
+   `[byllm.model]` does not. Also dropped a stray empty `[client]` table (not a real jac.toml
+   section; `[plugins.client]` is what's implied by `[plugins.client.vite]`).
+3. **`main.jac`'s `reindex_repo`**: `repo = root ++> Repo(...)` - `++>` returns a **list**, not the
+   node (confirmed via `jac-node-edge-patterns`: "`new = here ++> Todo(...)` makes `new` a list").
+   Broke on every *first-time* index of a new repo (the common case). Fixed with `[0]`.
+4. **`main.jac`'s `get_queue`**: both `.sort(key=lambda (c: ClusterView) { c.urgency; })` calls were
+   missing `return` inside the block-lambda body, so the sort key was always `None`. Real bug, not
+   just a checker complaint - `jac check` correctly flagged this as `E1054` and it was right to.
+5. **`agents/clustering.jac`'s `maybe_cluster`**: `cluster = repos[0] +>:owns:+> Cluster(...)` - same
+   list-vs-node pitfall as #3 (`+>:edge:+>` also returns a list). Fixed with `[0]`.
+
+None of these are Person 3's files, but they were blocking the server from running at all, so fixed
+them directly rather than just reporting them (matches the pattern already in this repo's own
+history - see the `5a0437d`/`d1ed6a8` commits: "fix merge-blocking bugs").
+
+**Then did the verification the previous merge's curl-diff approach couldn't do**: added a
+temporary `_debug_seed` walker to `main.jac` (same direct node/edge-construction pattern
+`main.test.jac` already uses) to get one real `Cluster` (2 issues, real computed `blast_radius=3`
+over a real 4-file `imports` graph), a real singleton, and a real unresolved issue - all without
+needing Ollama or the real `seed/repo/` (neither exists on this machine). Removed the walker again
+before committing; it never touched `main`. Confirmed in an actual headless Chrome session, zero
+console errors, at every step: login → repo picker → queue with real numbers → expand cluster (real
+5→1-row collapse, well, 2→1 here) → **real** `generate_pr` walker call (got back a real fake-PR
+number from the stub) → cluster detail → **real** graph view with correct live blast-radius topology
+and the reveal animation. Found and fixed one more real bug this surfaced: `cluster_view.cl.jac`
+hard-coded `"of 18 files"` in the blast-radius label - harmless against the eventual real 18-file
+repo, but actively wrong (`"3 of 18 files"`) against any other file count. Now reads `"N file(s)"`
+like every other row, no hard-coded total.
+
+**One unresolved oddity, not chased further (time-boxed):** at one point mid-session, real seeded
+graph data disappeared from `get_queue` after editing a `.cl.jac` file (confirmed via direct `curl`,
+not just the browser - the data was actually gone server-side). Re-seeding immediately after worked
+fine and stayed stable through several more edits/screenshots. Docs say `.cl.jac` edits should only
+trigger client-side HMR, not a server/data-affecting restart, so this may be a `jac start --dev`
+file-watcher quirk under some edit patterns. Never happened with a real seed you'd hate to lose
+(only my own throwaway debug data), but **don't trust a long-running dev session's seeded state
+across many small edits** - re-verify with a quick `get_queue` curl after any server-module-adjacent
+change, and always `reset_demo` + reseed fresh right before a checkpoint or the real rehearsal.
+
+Checklist above updated to reflect this pass. Remaining real work is unchanged from before this
+update: demo rehearsal, video, reach weights panel (if Person 1 ships `set_weights`) - none of it
+blocked anymore.
 
 ## Person 3 · Phase A — mocks + dashboard shell
 

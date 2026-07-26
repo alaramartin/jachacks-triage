@@ -1,4 +1,4 @@
-import from jaclang.byllm.lib { MockLLM }
+import from byllm.lib { MockLLM }
 import from graph.nodes { Repo, File, Issue, owns, resolves_to }
 
 glob llm: MockLLM;

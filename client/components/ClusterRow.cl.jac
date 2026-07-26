@@ -80,7 +80,7 @@ def:pub ClusterRow(
                 <div
                     className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border)]"
                 >
-                    {for issue in issues {
+                    {[
                         <div
                             key={issue["id"]}
                             className="flex items-center justify-between gap-4 px-5 py-3 pl-10"
@@ -102,7 +102,8 @@ def:pub ClusterRow(
                                 <ResolutionBadge method={issue["resolution_method"]}/>
                             </div>
                         </div>
-                    }}
+                        for issue in issues
+                    ]}
                     <button
                         key="view-detail"
                         onClick={handle_open_detail}

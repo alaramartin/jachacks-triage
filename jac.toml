@@ -35,16 +35,15 @@ typescript = "^5.3.3"
 base_route_app = "app"
 port = 8000
 
-[client]
-
 [plugins.client.vite]
 plugins = ["tailwindcss()"]
 lib_imports = ["import tailwindcss from '@tailwindcss/vite'"]
 
 # Single place the whole team configures the LLM (CLAUDE.md #7: "Don't scatter
-# model names"). Verified against jac-config docs + a live jac test run:
-# [byllm.model] is a top-level table, NOT [plugins.byllm.model] - the old
-# [plugins.<name>] path silently fails to parse and byLLM falls back to
-# OpenAI (which errors with no API key set).
-[byllm.model]
+# model names"). This has flip-flopped in git history between [byllm.model]
+# and [plugins.byllm.model] - settled by reading the bundled plugin source
+# directly (site-packages/byllm/config_loader.jac docstring: "Configuration
+# is loaded from jac.toml under [plugins.byllm] section", backed by
+# PluginConfigBase). A bare [byllm.model] is NOT read by the plugin at all.
+[plugins.byllm.model]
 default_model = "${BYLLM_DEFAULT_MODEL:-ollama/qwen2.5:7b}"

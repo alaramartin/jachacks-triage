@@ -33,7 +33,10 @@ walker:pub reindex_repo {
         if len(existing) > 0 {
             repo = existing[0];
         } else {
-            repo = root ++> Repo(full_name=self.full_name);
+            # `++>` returns a LIST of connected nodes, not the node itself -
+            # index [0] or `repo` silently becomes a 1-item list and every
+            # `repo.field` / `repo->:owns:->` read below breaks (jac-node-edge-patterns).
+            repo = (root ++> Repo(full_name=self.full_name))[0];
         }
 
         already_indexed: list[File] = [repo->:owns:->][?:File];
@@ -351,7 +354,7 @@ walker:pub get_queue {
                 )
             );
         }
-        cluster_views.sort(key=lambda (c: ClusterView) { c.urgency; }, reverse=True);
+        cluster_views.sort(key=lambda (c: ClusterView) { return c.urgency; }, reverse=True);
 
         singleton_views: list[SingletonView] = [];
         unresolved_views: list[UnresolvedView] = [];
@@ -380,7 +383,7 @@ walker:pub get_queue {
                 );
             }
         }
-        singleton_views.sort(key=lambda (s: SingletonView) { s.urgency; }, reverse=True);
+        singleton_views.sort(key=lambda (s: SingletonView) { return s.urgency; }, reverse=True);
 
         report QueueResponse(
             repo=repo.full_name,

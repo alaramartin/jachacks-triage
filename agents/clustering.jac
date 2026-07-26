@@ -91,7 +91,9 @@ def maybe_cluster(target: File) -> Cluster | None {
         cluster = existing[0];
     } else {
         repos: list[Repo] = [target<-:owns:<-][?:Repo];
-        cluster = repos[0] +>:owns:+> Cluster(cluster_key=target.path);
+        # `+>:owns:+>` returns a LIST of connected nodes, not the node itself -
+        # same pitfall as `++>` (jac-node-edge-patterns). Index [0].
+        cluster = (repos[0] +>:owns:+> Cluster(cluster_key=target.path))[0];
         cluster +>:cluster_targets:+> target;
     }
 

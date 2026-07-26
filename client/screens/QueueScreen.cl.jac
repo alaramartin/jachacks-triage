@@ -90,7 +90,7 @@ def:pub QueueScreen -> JsxElement {
     async def handle_generate_pr(cluster_id: str) {
         result = root spawn generate_pr(cluster_id=cluster_id);
         if result.reports and len(result.reports) > 0 {
-            pr_result = result.reports[0];
+            pr_result = result.reports[0] as dict;
         }
     }
 
