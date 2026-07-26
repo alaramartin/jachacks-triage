@@ -74,7 +74,7 @@ def:pub ClusterView -> JsxElement {
         }
         result = root spawn generate_pr(cluster_id=detail["id"] as str);
         if result.reports and len(result.reports) > 0 {
-            pr_result = result.reports[0];
+            pr_result = result.reports[0] as dict;
         }
     }
 
@@ -117,7 +117,9 @@ def:pub ClusterView -> JsxElement {
             <h1 className="text-2xl font-bold text-zinc-100 mb-4">{detail["title"]}</h1>
             <div className="flex gap-2 mb-6">
                 <StatPill
-                    value={str(detail["blast_radius"]) + " of 18 files"}
+                    value={str(detail["blast_radius"]) + (
+                        " file" if detail["blast_radius"] == 1 else " files"
+                    )}
                     label="blast radius"
                     emphasis={True}
                 />

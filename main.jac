@@ -38,6 +38,10 @@ walker:pub reindex_repo {
         if len(existing) > 0 {
             repo = existing[0];
         } else {
+            # NO `[0]` here - on the demo machine (jac 0.34.7) `++>` returns the
+            # bare node; indexing it fails. P1's and P3's machines return a list
+            # and DO need `[0]`. See PLAN.md's environment-split table before
+            # "fixing" this in either direction.
             repo = root ++> Repo(full_name=self.full_name);
         }
         # Remember where this repo lives on disk so ingest_issue, clustering
@@ -382,7 +386,7 @@ walker:pub get_queue {
                 )
             );
         }
-        cluster_views.sort(key=lambda (c: ClusterView) { c.urgency; }, reverse=True);
+        cluster_views.sort(key=lambda (c: ClusterView) { return c.urgency; }, reverse=True);
 
         singleton_views: list[SingletonView] = [];
         unresolved_views: list[UnresolvedView] = [];
@@ -423,7 +427,7 @@ walker:pub get_queue {
             }
         }
         singleton_views.sort(
-            key=lambda (s: SingletonView) { s.urgency; }, reverse=True
+            key=lambda (s: SingletonView) { return s.urgency; }, reverse=True
         );
 
         report QueueResponse(

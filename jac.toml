@@ -35,16 +35,24 @@ typescript = "^5.3.3"
 base_route_app = "app"
 port = 8000
 
-[client]
-
 [plugins.client.vite]
 plugins = ["tailwindcss()"]
 lib_imports = ["import tailwindcss from '@tailwindcss/vite'"]
 
 # Single place the whole team configures the LLM (CLAUDE.md #7: "Don't scatter
-# model names"). Verified against jac-config docs + a live jac test run:
-# [byllm.model] is a top-level table, NOT [plugins.byllm.model] - the old
-# [plugins.<name>] path silently fails to parse and byLLM falls back to
-# OpenAI (which errors with no API key set).
+# model names").
+#
+# THIS TABLE NAME IS ENVIRONMENT-SPECIFIC - it has flip-flopped in git history
+# because the two environments genuinely disagree (see PLAN.md's env-split
+# table). P3 read the STANDALONE byllm 0.6.19 source and correctly found it
+# wants [plugins.byllm]. The demo machine runs jac 0.34.7 with byllm BUNDLED,
+# where that table is silently ignored.
+#
+# Settled empirically on the demo machine, not by reading source: set
+# default_model to a bogus name under each table and run a by llm() call.
+#   [plugins.byllm.model] + bogus -> falls back to OpenAI  => NOT read
+#   [byllm.model]         + bogus -> error names the bogus model => IS read
+# Getting this wrong is silent: every by llm() call falls back to OpenAI and
+# fails with no API key. If you switch machines, re-run that probe.
 [byllm.model]
 default_model = "${BYLLM_DEFAULT_MODEL:-ollama/qwen2.5:7b}"

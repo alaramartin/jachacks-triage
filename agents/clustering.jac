@@ -97,6 +97,8 @@ def maybe_cluster(target: File) -> Cluster | None {
         cluster = existing[0];
     } else {
         repos: list[Repo] = [target<-:owns:<-][?:Repo];
+        # NO `[0]` here - same environment split as main.jac's reindex_repo:
+        # on the demo machine `+>:owns:+>` yields the bare node. See PLAN.md.
         cluster = repos[0] +>:owns:+> Cluster(cluster_key=target.path);
         cluster +>:cluster_targets:+> target;
     }
