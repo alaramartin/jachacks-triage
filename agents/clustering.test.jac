@@ -1,27 +1,30 @@
-import from byllm.lib { MockLLM }
+import from jaclang.byllm.lib { MockLLM }
 import from graph.nodes { Repo, File, Issue, owns, resolves_to }
 
-glob llm = MockLLM(
-         model_name="mockllm",
-         config={
-             "outputs": [
-                 RootCauseGate(
-                     same_root_cause=True,
-                     title="require_fields() crashes on None/unicode",
-                     root_cause_summary="None guard + unicode-safe truncation missing.",
-                     proposed_fix_summary="Add a None guard and normalize unicode before length checks."
-                 ),
-                 RootCauseGate(
-                     same_root_cause=False,
-                     title="",
-                     root_cause_summary="",
-                     proposed_fix_summary=""
-                 )
-             ]
-         }
-     );
+glob llm: MockLLM;
+
+# `llm` (and any RootCauseGate instances in its outputs) are constructed
+# lazily, INSIDE each test - not at module load time (bare `glob = ...` or a
+# module-level `with entry` both raise `NameError: RootCauseGate is not
+# defined`, since this annex's merged-module load order runs before
+# clustering.jac's own class body has executed). Referencing base-module
+# names at test-EXECUTION time works fine, which is what the annex is for.
 
 test "5 issues sharing one root cause form a single cluster" {
+    llm = MockLLM(
+        model_name="mockllm",
+        config={
+            "outputs": [
+                RootCauseGate(
+                    same_root_cause=True,
+                    title="require_fields() crashes on None/unicode",
+                    root_cause_summary="None guard + unicode-safe truncation missing.",
+                    proposed_fix_summary="Add a None guard and normalize unicode before length checks."
+                )
+            ]
+        }
+    );
+
     repo = Repo(full_name="t/validation", file_count=18);
     target = repo +>:owns:+> File(path="core/validation.py", blast_radius=14);
 
@@ -49,6 +52,20 @@ test "5 issues sharing one root cause form a single cluster" {
 }
 
 test "two issues on the same file with different root causes do NOT cluster (SEED-15/16 guard)" {
+    llm = MockLLM(
+        model_name="mockllm",
+        config={
+            "outputs": [
+                RootCauseGate(
+                    same_root_cause=False,
+                    title="",
+                    root_cause_summary="",
+                    proposed_fix_summary=""
+                )
+            ]
+        }
+    );
+
     repo = Repo(full_name="t/orders", file_count=18);
     target = repo +>:owns:+> File(path="services/orders.py", blast_radius=1);
 

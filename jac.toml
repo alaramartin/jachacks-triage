@@ -6,7 +6,12 @@ entry-point = "main.jac"
 kind = "fullstack"
 
 [dependencies]
-byllm = "~=0.6"
+# byLLM ships bundled inside the jac binary itself (jaclang.byllm) - no
+# separate pip package needed or wanted. A `byllm = "..."` pip dependency
+# here shadows the compatible bundled copy with an incompatible PyPI fork
+# (uses `by postinit`/`global` syntax this compiler can't parse) and breaks
+# EVERY by llm() call project-wide. If you see "Missing ';'" errors deep in
+# a byllm/*.jac traceback, check here first before touching Ollama/API keys.
 
 [dependencies.npm]
 react = "^18.2.0"
