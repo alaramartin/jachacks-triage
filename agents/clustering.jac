@@ -19,12 +19,15 @@ import from graph.nodes {
     cluster_targets
 }
 
-"""Best-effort read of the target file's actual source (demo convention:
-seed/repo/, same as main.jac's ingest_issue - see its TODO(P1) note about
-storing repo_path on Repo once that schema field exists). Empty string if
-unreadable - the gate degrades to text-only judgment, never errors."""
-def _read_source(path: str) -> str {
-    full_path: str = os.path.join("seed/repo", path);
+"""Best-effort read of the target file's actual source from wherever the
+repo was actually indexed from (Repo.repo_path, written by reindex_repo).
+Empty string if unreadable - the gate degrades to text-only judgment,
+never errors."""
+def _read_source(path: str, repo_root: str) -> str {
+    if not repo_root {
+        return "";
+    }
+    full_path: str = os.path.join(repo_root, path);
     if not os.path.exists(full_path) {
         return "";
     }
@@ -68,7 +71,9 @@ def maybe_cluster(target: File) -> Cluster | None {
     }
 
     summaries: list[str] = [f"{m.external_id}: {m.title} - {m.body}" for m in members];
-    source_code: str = _read_source(target.path);
+    owning: list[Repo] = [target<-:owns:<-][?:Repo];
+    repo_root: str = owning[0].repo_path if len(owning) > 0 else "";
+    source_code: str = _read_source(target.path, repo_root);
     gate: RootCauseGate = assess_root_cause(target.path, source_code, summaries);
 
     if not gate.same_root_cause {

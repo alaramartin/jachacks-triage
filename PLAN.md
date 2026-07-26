@@ -109,7 +109,26 @@ None. There is no partially-built Person 1 work in flight right now.
 None remaining in Person 1's scope. (There's no C6 checklist item for Person 1 in this plan — C6
 is Person 2's final Devpost submission and Person 3's screenshots/demo-preload work.)
 
-### 🚨 CRITICAL — cross-machine jaclang/byllm environment split found this session
+### ✅ RESOLVED — the environment split above, decided at the P1+P2 merge
+
+**The demo runs on Person 2's machine (`jac 0.34.7`, byllm bundled, Ollama installed). The repo's
+syntax is now pinned to THAT machine.** Person 1's machine (`jaclang 0.16.7` + standalone
+`byllm 0.6.19`) has **no Ollama at all** and therefore cannot run the LLM pipeline the demo
+depends on, so it can't be the demo host — which settles which dialect wins.
+
+Re-verified empirically on the demo machine with minimal `jac run` repros (not from notes):
+
+| Construct | Demo machine (authoritative) | P1's machine |
+| --- | --- | --- |
+| `root ++> Node()` | returns a **bare node** → no `[0]` | returns `list` → needs `[0]` |
+| sort key lambda | `lambda (c: T) { c.urgency; }` | `lambda c: T : c.urgency` |
+| MockLLM / Model import | `jaclang.byllm.lib` | `byllm.lib` |
+
+Person 1's commit `bb66395` flipped all three the other way; the merge commit reverted the syntax
+while **keeping all of P1's feature work** (`Settings`, `set_weights`, weighted re-rank). If you
+pull and `jac check` fails on these three shapes, you are on the other environment — do not
+"fix" them back, match the table above. Everything below is P1's original write-up, kept for
+context.
 
 **Read this before anyone touches `main.jac`, `agents/clustering.jac`, or their tests again.**
 After pulling the merged `main` (commit `f140031`), `jac check main.jac` **failed to compile on

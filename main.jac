@@ -40,6 +40,9 @@ walker:pub reindex_repo {
         } else {
             repo = root ++> Repo(full_name=self.full_name);
         }
+        # Remember where this repo lives on disk so ingest_issue, clustering
+        # and pr_agent can read real source instead of assuming "seed/repo".
+        repo.repo_path = self.repo_path;
 
         already_indexed: list[File] = [repo->:owns:->][?:File];
         if len(already_indexed) > 0 {
@@ -116,11 +119,8 @@ walker:pub ingest_issue {
         files: list[File] = [repo->:owns:->][?:File];
         file_paths: list[str] = [f.path for f in files];
 
-        # TODO(P1): once Repo stores the on-disk repo_path it was indexed from,
-        # pass that through instead of this seed-demo convention (also used as
-        # the reindex_repo request's repo_path throughout CLAUDE.md #6).
         resolution = resolve_issue(
-            self.title, self.body, file_paths, repo_root="seed/repo"
+            self.title, self.body, file_paths, repo_root=repo.repo_path
         );
         severity: int = assess_severity(self.title, self.body);
         diff_lines: int = estimate_diff_size(self.title, self.body);

@@ -5,6 +5,10 @@ node Repo {
     has full_name: str;
     has default_branch: str = "main";
     has file_count: int = 0;
+    # On-disk path this repo was indexed from (reindex_repo's repo_path).
+    # Read by triage/clustering/pr_agent to load real source off disk instead
+    # of each hardcoding the "seed/repo" demo convention.
+    has repo_path: str = "";
 }
 
 node File {

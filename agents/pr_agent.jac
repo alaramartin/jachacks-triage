@@ -138,9 +138,15 @@ def build_pr_body(
 """The only entry point `generate_pr` (main.jac) should call. Everything
 GitHub-specific lives in integrations/github.jac; this function owns the
 domain logic (denylist gate, source read, LLM fix, PR body)."""
-def build_pr_for_cluster(
-    cluster: Cluster, repo: Repo, repo_root: str = "seed/repo"
-) -> PullRequestResult {
+def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
+    # Where the repo was actually indexed from (reindex_repo -> Repo.repo_path),
+    # not a hardcoded demo path.
+    repo_root: str = repo.repo_path;
+    if not repo_root {
+        return PullRequestResult(
+            ok=False, error="repo has no repo_path - call reindex_repo first"
+        );
+    }
     targets: list[File] = [cluster->:cluster_targets:->][?:File];
     if len(targets) == 0 {
         return PullRequestResult(ok=False, error="cluster has no target file");
