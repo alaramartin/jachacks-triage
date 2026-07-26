@@ -503,6 +503,26 @@ glob reads in `QueueScreen.cl.jac`/`cluster_view.cl.jac` with `sv import`-ed cal
 should carry over almost unchanged. After that: demo rehearsal script, video recording, and the
 reach weights panel (only if Person 1 ships `set_weights`).
 
+**Update — Person 1 already pushed `get_queue`/`get_cluster_detail` to `main`** (commits
+`199ffb4`, `f92af45`: graph schema, AST parser, blast-radius/clustering/ranking agents, and both
+endpoints wired into `main.jac`). Checked the response shapes against my mocks — mostly a direct
+match (`QueueResponse`/`ClusterView`/`SingletonView`/`UnresolvedView`/`IssueSummary` field names are
+identical to what `QueueScreen.cl.jac` already expects), but **two real differences to fix when
+wiring the live swap:**
+1. `get_cluster_detail`'s graph payload only ever emits `role: "target"` or `"dependent"` —
+   non-dependent files are omitted entirely, there's no `"neutral"` node in the real data.
+   `GraphView.cl.jac`'s neutral-node styling becomes dead code against live data (harmless, just
+   won't render anything) unless we decide to enhance it later.
+2. **Edges use keys `"from"`/`"to"`**, not `"from_file"`/`"to_file"` like my mock and
+   `GraphView.cl.jac` use. I picked `from_file`/`to_file` defensively (wasn't sure `from` was safe
+   as a plain dict key) — turns out it's fine, Person 1's server code uses `"from"`/`"to"` directly.
+   Will need a rename in `GraphView.cl.jac` when swapping to live data.
+
+**However, the pipeline isn't fully runnable end-to-end yet** — Person 2 hasn't pushed
+`ingest_issue`, `seed/seed.jac`, or the seed repo itself, so `get_queue` right now would just
+return an empty/unindexed repo (no `Issue`/`Cluster` nodes exist). The C3 swap is close but not
+quite unblocked — still waiting on Person 2's Phase B before there's real data to point at.
+
 ## Person 3 · Phase A — mocks + dashboard shell
 
 1. **First, by hand, write `mocks/queue.json` and `mocks/cluster_detail.json`** using the exact
