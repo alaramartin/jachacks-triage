@@ -626,15 +626,35 @@ until 3:30.**
 
 ## ✅ Person 3 master checklist
 
-- [x] **Phase A:** write `mocks/*.json` by hand → login + repo picker → the ranked queue screen (the money shot)
-- [x] **🛑 C1** (~12:45): confirm API shapes unchanged — confirmed post-hoc, only the `from_file`/`to_file` vs `from`/`to` edge-key difference noted below.
-- [x] **🛑 C2** (2:15): merge LAST; confirm build is clean — merged `p3/client` → `main`, `jac check main.jac` passes clean.
-- [x] **Phase B:** cluster detail page → graph visualization → wire Generate PR button (now on live data, see below)
-- [x] **🛑 C3** (3:30): swap mocks → live data; full click-through works — **DONE and browser-verified** (not just curl'd JSON): real seeded cluster/singleton/unresolved data rendered correctly through every screen incl. Generate PR and the graph view, zero console errors, after fixing 5 bugs that were actually blocking the server from starting at all (see update below). Still on a small hand-seeded graph, not the full 20-issue pipeline (needs Ollama + real `seed/repo/`, neither available on this machine).
-- [ ] **Phase C:** live cluster detail (done) → polish (in progress: accessibility, mobile responsiveness, hard-coded label bug all fixed) → rehearse ≥3× → record video → _(reach)_ weights panel
-- [ ] **🛑 C4** (5:30): feature freeze; video recorded
-- [ ] **🛑 C5** (5:50): confirm Person 2 submitted the partial
-- [ ] **🛑 C6** (6:45–7:15): final screenshots; demo pre-loaded
+**Status as of this update: everything Person 3 can do solo is done.** Every remaining item below
+is either waiting on a teammate's work, or needs a human (rehearsing out loud, recording a screen
+capture) rather than more agent work. Nothing is stalled on me right now.
+
+### ✅ Done
+- [x] **Phase A:** `mocks/*.json` hand-written → login + repo picker → the ranked queue screen
+- [x] **Phase B:** cluster detail page → graph visualization (with the hop-reveal animation) → Generate PR wired
+- [x] **🛑 C1** (~12:45): API shapes confirmed unchanged (only the `from_file`/`to_file` vs `from`/`to` edge-key naming difference, fixed during the live swap)
+- [x] **🛑 C2** (2:15): merged `p3/client` → `main`; `jac check` clean
+- [x] **🛑 C3** (3:30): swap mocks → live data — done AND **verified in a real browser**, not just diffed JSON: real seeded cluster/singleton/unresolved data through every screen including a real `generate_pr` call and the graph view, zero console errors
+- [x] Queue/cluster-detail polish pass: keyboard accessibility (the cluster row is a real `role="button"` with focus ring + Enter/Space, not just a clickable div), mobile responsiveness (rows were overlapping under ~500px, fixed), a hard-coded `"of 18 files"` label bug fixed, PR success/error banners matching the real `{ok, ...}` contract
+- [x] Fixed 5 bugs that were blocking **the whole team's server from starting at all** (not strictly Person 3 scope, but needed doing - see the session log above for detail: a wrong import in `agents/clustering.test.jac`, a wrong `jac.toml` LLM config section, two `++>`/`+>:edge:+>` list-vs-node bugs, a missing `return` in a sort key)
+
+### ⏳ Waiting on other people's work
+- [ ] **Full 20-issue real-pipeline demo** (the actual target numbers: cluster A blast radius 14, urgency 7.22, etc.) — waiting on **Person 2** to make the real `seed/repo/` (18-file Python demo repo) available. Per CLAUDE.md it lives in its own separate git repo and isn't in this repo or on this machine; today's live-data verification used a small 4-file hand-seeded stand-in instead.
+- [ ] **Real "review on GitHub" link on Generate PR** — waiting on **Person 2's Phase C**: `integrations/github.jac`'s `create_pull_request` is still a documented stub (fake PR number/URL). Doesn't block anything on my end; the UI already reads whatever the walker returns.
+- [ ] **_(Reach)_ weights/personalization panel** — waiting on **Person 1** to build `set_weights` and the `Settings` node (PLAN.md Phase C reach item). Not started on their side yet (no `set_weights` in `main.jac`), so there's nothing for me to wire up. Skip entirely if the team is behind schedule - it's explicitly the first cut.
+
+### 🙋 Needs you, not a teammate or more agent work
+- [ ] **Rehearse the 4-minute demo end-to-end ≥3×** (CLAUDE.md §8 beat sheet) - this has to be a human talking through it
+- [ ] **Record the demo video** during a clean run
+- [ ] **🛑 C4** (5:30): feature freeze - confirm the full live flow + that the video is recorded
+- [ ] **🛑 C5** (5:50): confirm Person 2 submitted the Devpost partial (mandatory)
+- [ ] **🛑 C6** (6:45–7:15): final screenshots + confirm the demo is pre-loaded and `reset_demo` is ready for a clean run at the judging table
+
+### Practical note on the empty graph right now
+The graph is currently reset/empty (I cleared my test data after verifying). Before rehearsing or
+recording, either re-seed a quick fake dataset (fast, ask me) or run the real pipeline once
+`seed/repo/` + a working LLM (Ollama or an API key) are available.
 
 ### Session log (Person 3) — resume point
 
