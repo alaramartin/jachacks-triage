@@ -444,15 +444,64 @@ until 3:30.**
 
 ## ✅ Person 3 master checklist
 
-- [ ] **Phase A:** write `mocks/*.json` by hand → login + repo picker → the ranked queue screen (the money shot)
-- [ ] **🛑 C1** (~12:45): confirm API shapes unchanged
-- [ ] **🛑 C2** (2:15): merge LAST; confirm build is clean
-- [ ] **Phase B:** cluster detail page → graph visualization → wire Generate PR button
-- [ ] **🛑 C3** (3:30): swap mocks → live data; full click-through works
-- [ ] **Phase C:** live cluster detail → polish → rehearse ≥3× → record video → _(reach)_ weights panel
+- [x] **Phase A:** write `mocks/*.json` by hand → login + repo picker → the ranked queue screen (the money shot)
+- [ ] **🛑 C1** (~12:45): confirm API shapes unchanged — not yet confirmed with team (no chat check-in done)
+- [ ] **🛑 C2** (2:15): merge LAST; confirm build is clean — **not merged to `main` yet**, still on `p3/client`
+- [x] **Phase B:** cluster detail page → graph visualization → wire Generate PR button (all on mock data)
+- [ ] **🛑 C3** (3:30): swap mocks → live data; full click-through works — **blocked on Person 1's `get_queue`/`get_cluster_detail` and Person 2's seeded pipeline landing on `main`**
+- [ ] **Phase C:** live cluster detail (blocked) → polish (started) → rehearse ≥3× → record video → _(reach)_ weights panel
 - [ ] **🛑 C4** (5:30): feature freeze; video recorded
 - [ ] **🛑 C5** (5:50): confirm Person 2 submitted the partial
 - [ ] **🛑 C6** (6:45–7:15): final screenshots; demo pre-loaded
+
+### Session log (Person 3) — resume point
+
+Everything below is done and pushed to `origin/p3/client` (4 commits), **not yet merged to `main`**.
+If you `/clear` and come back, read this before re-reading the rest of the file.
+
+**What's built, all on mock data:**
+- `mocks/queue.json`, `mocks/cluster_detail.json` — hand-written, match CLAUDE.md §6 exactly.
+- `client/app.cl.jac` — manual `<Router>` (not file-based `pages/`), routes: `/` login, `/repos`
+  repo picker, `/queue` ranked queue, `/cluster/:id` detail+graph.
+- `client/screens/{LoginScreen,RepoPickerScreen,QueueScreen}.cl.jac`, `client/cluster_view.cl.jac`,
+  `client/components/{ClusterRow,SingletonRow,UnresolvedList,ResolutionBadge,StatPill,GraphView}.cl.jac`.
+- `client/mock_data.cl.jac` — the mock `get_queue`/`get_cluster_detail` responses as **plain dicts**
+  (see gotcha below for why, not `obj`).
+- Full click-through verified in a real browser (not just `jac check`): login → repo picker → queue
+  (expand cluster → 5 differently-worded issues collapse into one row, exactly the beat-2 "collapse"
+  moment) → Generate PR (mock success banner + a real error-banner code path, matching the
+  `{ok, pr_number, pr_url}` / `{ok:false, error}` contract) → cluster detail with an animated SVG
+  graph (rings reveal outward from the target by `hops` on a timer, per beat 3).
+- Keyboard accessibility (the cluster row toggle is a real `role="button"` with focus ring +
+  Enter/Space, not just a clickable div) and mobile responsiveness (rows were overlapping text
+  under ~500px, fixed with `flex-wrap`) — both confirmed visually at a 390px viewport.
+- `jac.toml` and `main.jac` didn't exist yet when this session started (only Person 2's `jac.toml`
+  fragment + `agents/triage_agent.jac` were on `main`) — added `kind = "fullstack"`, Tailwind v4,
+  and the `cl {}` entry block. If Person 1 also touches `jac.toml`'s `[dependencies.npm]` /
+  `[plugins.client]` sections, merge carefully — first real merge-conflict risk on this branch.
+
+**⚠️ Two real bugs found by actually running the app (not caught by `jac check`) — worth knowing
+if Person 1/2 write `.cl.jac` or edit `jac.toml`:**
+1. **`obj`/`glob` in client (`.cl.jac`) files are not exported across files unless declared
+   `obj:pub` / `glob:pub`.** Plain `obj`/`glob` passes `jac check` clean but fails at runtime with
+   a JS "does not provide an export named X" error. Only surfaces when you actually load the page.
+2. **`obj` construction in client code (`SomeObj(field=val)`) compiles to a bare JS call missing
+   `new`**, throwing `TypeError: Class constructor X cannot be invoked without 'new'` at runtime —
+   also invisible to `jac check`. Worked around by using plain `dict` literals instead of typed
+   `obj`s for all client-side mock/display data, with explicit `as str`/`as float`/`as list[dict]`
+   casts at the spots the strict type checker needs a concrete type (Callable params, `len()`,
+   string concat, arithmetic). **Lesson: a clean `jac check` is not proof the client code runs —
+   always verify with a cold `jac start --dev` + real browser check before trusting it.**
+3. (Environment-specific, not a Jac bug) `jac install` on this Windows machine writes `jac.toml`
+   in the system codepage, not UTF-8 — it corrupted an em-dash in the `description` field into an
+   unreadable byte and broke every subsequent `jac` command until fixed. Keep non-ASCII characters
+   out of `jac.toml` if you're on Windows.
+
+**Not done / next up:** the live-data swap (C3) is the only remaining hard blocker. Once
+`get_queue`/`get_cluster_detail` exist on `main`, replace the `mock_queue`/`mock_cluster_detail`
+glob reads in `QueueScreen.cl.jac`/`cluster_view.cl.jac` with `sv import`-ed calls — the dict shape
+should carry over almost unchanged. After that: demo rehearsal script, video recording, and the
+reach weights panel (only if Person 1 ships `set_weights`).
 
 ## Person 3 · Phase A — mocks + dashboard shell
 
@@ -560,6 +609,27 @@ no backend running.
 14 dependents as `dependent` nodes with `hops` (direct importers `core/db.py`, `models/order.py`,
 `models/user.py`, `models/product.py`, `models/cart.py`, `services/upload.py` at hops 1; the rest
 at hops 2–3). Edges in code direction. **The visual point: one node reaches almost the whole repo.**
+
+---
+
+---
+
+# SHARED — gotchas discovered so far (read if you touch `.cl.jac` or `jac.toml`)
+
+_Added by Person 3, mid-afternoon session. See the Person 3 session log above for full detail._
+
+- **`obj`/`glob` in client (`.cl.jac`) code need `obj:pub` / `glob:pub` to be importable from
+  another file** — plain `obj`/`glob` passes `jac check` but fails at runtime with a JS export
+  error. Not caught by the type checker.
+- **`obj` construction in client code (`SomeObj(field=val)`) compiles to a JS call missing `new`**
+  and throws at runtime (`Class constructor X cannot be invoked without 'new'`) — also invisible to
+  `jac check`. Workaround: use plain `dict` literals for client-side data instead of `obj`, with
+  `as <type>` casts where the checker needs a concrete type.
+- **A clean `jac check` does not mean the app runs.** Both bugs above only showed up after an
+  actual `jac start --dev` + browser load. Verify in a real browser before trusting green checks.
+- **On Windows, `jac install` can corrupt `jac.toml`'s encoding** if it contains non-ASCII
+  characters (it wrote an em-dash in cp1252 and broke every subsequent `jac` command). Keep
+  `jac.toml` ASCII-only if you're on Windows.
 
 ---
 
