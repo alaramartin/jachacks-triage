@@ -912,10 +912,29 @@ capture) rather than more agent work. Nothing is stalled on me right now.
 - [x] Queue/cluster-detail polish pass: keyboard accessibility (the cluster row is a real `role="button"` with focus ring + Enter/Space, not just a clickable div), mobile responsiveness (rows were overlapping under ~500px, fixed), a hard-coded `"of 18 files"` label bug fixed, PR success/error banners matching the real `{ok, ...}` contract
 - [x] Fixed 5 bugs that were blocking **the whole team's server from starting at all** (not strictly Person 3 scope, but needed doing - see the session log above for detail: a wrong import in `agents/clustering.test.jac`, a wrong `jac.toml` LLM config section, two `++>`/`+>:edge:+>` list-vs-node bugs, a missing `return` in a sort key)
 
-### ⏳ Waiting on other people's work
-- [ ] **Full 20-issue real-pipeline demo** (the actual target numbers: cluster A blast radius 14, urgency 7.22, etc.) — waiting on **Person 2** to make the real `seed/repo/` (18-file Python demo repo) available. Per CLAUDE.md it lives in its own separate git repo and isn't in this repo or on this machine; today's live-data verification used a small 4-file hand-seeded stand-in instead.
-- [ ] **Real "review on GitHub" link on Generate PR** — waiting on **Person 2's Phase C**: `integrations/github.jac`'s `create_pull_request` is still a documented stub (fake PR number/URL). Doesn't block anything on my end; the UI already reads whatever the walker returns.
-- [ ] **_(Reach)_ weights/personalization panel** — waiting on **Person 1** to build `set_weights` and the `Settings` node (PLAN.md Phase C reach item). Not started on their side yet (no `set_weights` in `main.jac`), so there's nothing for me to wire up. Skip entirely if the team is behind schedule - it's explicitly the first cut.
+### ⏳ Waiting on other people's work — ALL UNBLOCKED at the P3 merge
+
+- [x] ~~**Full 20-issue real-pipeline demo**~~ — **DONE.** `seed/repo/` is present and P1+P2 are
+      merged, so this ran for real against the merged code on the demo machine: 18 files /
+      26 import edges, all 20 seed issues ingested through the live Ollama pipeline, `get_queue`
+      returning **3 clusters + 8 singletons + 4 unresolved = 20**. Top cluster is
+      `core/validation.py`, **blast radius 14**, 4 issues, urgency **6.76**.
+      **Note the numbers moved from the old plan:** the target cluster has **4** issues (not 5) at
+      urgency **6.76** (not 7.22), because the live LLM resolves SEED-05 to `utils/csv_export.py`
+      instead. The beat still lands — 4 differently-worded tickets collapse into one row that
+      outranks SEED-12 at **severity 10** (urgency 2.00). Use the real numbers when narrating.
+- [x] ~~**Real "review on GitHub" link on Generate PR**~~ — **DONE.** `create_pull_request` is no
+      longer a stub; the button opens a real PR and the UI's `href={pr_result["pr_url"]}` now
+      points at a genuine GitHub URL. Verified end-to-end through the merged code:
+      **PR #4** → https://github.com/alaramartin/triage-demo/pull/4, and `get_cluster_detail`
+      reports it back as `existing_pr`.
+- [ ] 🟡 **_(Reach)_ weights/personalization panel — THE ONLY REMAINING P3 CODE ITEM.**
+      No longer blocked: Person 1 shipped the `Settings` node and the `set_weights` walker, and
+      both are verified working (setting `w_reactions=10` and zeroing the rest re-ranks the loud
+      SEED-12 to the top at 8.78; restoring defaults puts `core/validation.py` back at 6.76).
+      **Nothing in `client/` references `set_weights` — the panel is not built.**
+      **This is explicitly the first thing to cut** (CLAUDE.md scope guards + this plan's own
+      "skip entirely if the team is behind"). See "Next steps" below before starting it.
 
 ### 🙋 Needs you, not a teammate or more agent work
 - [ ] **Rehearse the 4-minute demo end-to-end ≥3×** (CLAUDE.md §8 beat sheet) - this has to be a human talking through it
@@ -924,10 +943,55 @@ capture) rather than more agent work. Nothing is stalled on me right now.
 - [ ] **🛑 C5** (5:50): confirm Person 2 submitted the Devpost partial (mandatory)
 - [ ] **🛑 C6** (6:45–7:15): final screenshots + confirm the demo is pre-loaded and `reset_demo` is ready for a clean run at the judging table
 
-### Practical note on the empty graph right now
-The graph is currently reset/empty (I cleared my test data after verifying). Before rehearsing or
-recording, either re-seed a quick fake dataset (fast, ask me) or run the real pipeline once
-`seed/repo/` + a working LLM (Ollama or an API key) are available.
+### 📊 Person 3 status after the merge: CODE-COMPLETE except one optional reach item
+
+Everything on Person 3's required path is **done and verified live against real data** — no mocks
+anywhere on the live path (`client/mock_data.cl.jac` and `mocks/*.json` still exist but are dead
+code; nothing imports them). The **only** unbuilt item is the _(reach)_ weights panel, which the
+plan and CLAUDE.md both name as the first thing to cut.
+
+**Next steps, in priority order:**
+
+1. **Rehearse + record** (highest value by far). The demo is fully working right now — see the
+   "how to run the demo" block below. This is the remaining human work and it matters more than
+   any additional feature.
+2. **Decide on the weights panel.** It is genuinely optional. If you want it, the backend is
+   already done and tested, so the work is purely client-side: a small slider/preset control that
+   calls `set_weights(full_name, w_blast, w_sev, w_diff, w_reactions, w_comment_velocity)` and
+   then re-fetches `get_queue`. A "sort by popularity instead" preset button is the cheapest
+   version and makes a sharp demo point — flipping it shoots the loud severity-10 SEED-12 to the
+   top, which *proves* the default ranking is structural rather than popularity-driven.
+   **Do not start this until the video is recorded.**
+3. **C4/C5/C6** — freeze, Devpost partial, final screenshots. Human submission steps.
+
+### 🚨 Demo-day gotchas found while verifying (read before rehearsing)
+
+- **Editing ANY `.jac` file while `jac start main.jac --dev` is running WIPES the seeded graph.**
+  The dev server watches `**/*.jac` and hot-reloads; the reload dropped all 20 seeded issues
+  mid-verification (`[HMR] Reloaded: seed/seed.jac` → `get_queue` returned `file_count=0`). It can
+  also leave duplicate `Repo` nodes behind, where `get_queue` finds a repo with 18 files but zero
+  issues. **Do not touch a `.jac` file between seeding and demoing.** If it happens: restart
+  clean (`pkill -f "jac start main.jac"`, `jac clean --all --force`, restart) and re-seed —
+  `reset_demo` alone does not fix the duplicate-Repo case.
+- **The API port depends on the mode.** `--no-client` → API on **8000**. `--dev` → app on
+  **8000**, API on **8001**. `seed/seed.jac` defaults to 8000; for a `--dev` server run
+  `TRIAGE_API=http://localhost:8001 jac run seed/seed.jac`.
+- **Seeding takes a few minutes** (20 sequential local-LLM ingests). Seed *before* the judges are
+  watching, and never re-seed without `reset_demo` first or you get duplicate issues.
+
+### ▶️ How to run the demo (verified working end to end)
+
+```bash
+pkill -f "jac start main.jac"; jac clean --all --force
+jac start main.jac --dev                       # app :8000, API :8001
+# then, in a second terminal, once it says "Server ready":
+curl -X POST http://localhost:8001/walker/reindex_repo \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path":"seed/repo","full_name":"alaramartin/triage-demo"}'
+TRIAGE_API=http://localhost:8001 jac run seed/seed.jac    # ~few minutes, 20 issues
+```
+
+Then open **http://localhost:8000/** → login → repo picker → the ranked queue.
 
 ### Session log (Person 3) — resume point
 
