@@ -1,0 +1,14 @@
+[project]
+name = "triage"
+version = "0.1.0"
+description = "Triage — a structural, graph-native lens on the GitHub issue queue."
+entry-point = "main.jac"
+
+[byllm.model]
+default_model = "${BYLLM_DEFAULT_MODEL:-ollama/qwen2.5:7b}"
+
+[serve]
+port = 8000
+
+[dependencies]
+byllm = "~=0.6"

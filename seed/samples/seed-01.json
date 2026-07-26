@@ -1,0 +1,8 @@
+{
+  "external_id": "SEED-01",
+  "title": "Crash when submitting checkout form",
+  "body": "Users report checkout dies with a 500 as soon as they submit the form. Server log:\n\nTraceback (most recent call last):\n  File \"api/routes_orders.py\", line 6, in post_order\n    order = place_order(request[\"customer_id\"], request[\"items\"])\n  File \"services/orders.py\", line 8, in place_order\n    order = Order.create({\"customer_id\": customer_id, \"items\": items})\n  File \"models/order.py\", line 16, in create\n    require_fields(payload, [\"customer_id\", \"items\"])\n  File \"core/validation.py\", line 12, in require_fields\n    if len(str(payload.get(f)).strip()) == 0:\nTypeError: 'NoneType' object has no attribute 'strip'\n\nHappens maybe 1 in 20 checkouts, seems random.",
+  "created_at": "2026-07-24T09:12:00Z",
+  "reactions": 3,
+  "comment_velocity": 1
+}

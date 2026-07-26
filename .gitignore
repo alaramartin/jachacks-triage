@@ -1,0 +1,23 @@
+# The seed demo repo is plain Python and must not dilute this repo's Jac language %.
+# It lives as its own git repo (see seed/repo/.git) and gets pushed to GitHub separately.
+seed/repo/
+
+# secrets
+.env
+.env.local
+*.pem
+
+# python
+__pycache__/
+*.pyc
+
+# node (client tooling, if any)
+node_modules/
+
+# OS
+.DS_Store
+
+# Jac build artifacts
+.jac/
+.pytest_cache/
+
