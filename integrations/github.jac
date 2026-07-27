@@ -118,6 +118,16 @@ def _api_get(url: str) -> dict | None {
     }
 }
 
+def _api_get_list(url: str) -> list[dict] | None {
+    req = Request(url, headers=_auth_headers());
+    try {
+        resp = urlopen(req);
+        return json.loads(resp.read().decode("utf-8"));
+    } except HTTPError {
+        return None;
+    }
+}
+
 obj ApiSendResult {
     has data: dict | None = None;
     has error: str = "";
@@ -135,6 +145,71 @@ def _api_send(url: str, method: str, payload: dict) -> ApiSendResult {
         detail: str = e.read().decode("utf-8") if e.fp else str(e);
         return ApiSendResult(error=f"GitHub API {method} {url} -> {e.code}: {detail}");
     }
+}
+
+obj RemoteIssue {
+    has external_id: str = "";
+    has title: str = "";
+    has body: str = "";
+    has created_at: str = "";
+    has reactions: int = 0;
+    has comment_velocity: int = 0;
+}
+
+"""Live open issues on `full_name`, read straight from the GitHub REST API -
+this is what makes the dashboard work against ANY repo (not just the seed
+repo) once auth is wired up, not just the one we ingested at demo time.
+Pull requests share the issues endpoint on GitHub (they show up with a
+`pull_request` key) and are filtered out here since Triage only triages
+issues. `comment_velocity` isn't a GitHub field - it's derived as comments
+per day-since-created (min 1 day denominator) so a fresh flood of comments
+reads as "hot" the same way engagement genuinely would."""
+def fetch_open_issues(full_name: str) -> list[RemoteIssue] {
+    out: list[RemoteIssue] = [];
+    page: int = 1;
+    while page <= 10 {
+        rows: list[dict] | None = _api_get_list(
+            f"https://api.github.com/repos/{full_name}/issues"
+            f"?state=open&per_page=100&page={page}&sort=created&direction=asc"
+        );
+        if rows is None or len(rows) == 0 {
+            break;
+        }
+        for r in rows {
+            if "pull_request" in r {
+                continue;
+            }
+            created_at: str = r.get("created_at", "");
+            comments: int = r.get("comments", 0);
+            days_open: float = _days_since(created_at);
+            velocity: int = round(comments / days_open) if days_open > 0 else comments;
+            reaction_block: dict = r.get("reactions", {});
+            out.append(
+                RemoteIssue(
+                    external_id=str(r["number"]),
+                    title=r.get("title", ""),
+                    body=r.get("body") or "",
+                    created_at=created_at,
+                    reactions=reaction_block.get("total_count", 0),
+                    comment_velocity=velocity,
+                )
+            );
+        }
+        if len(rows) < 100 {
+            break;
+        }
+        page += 1;
+    }
+    return out;
+}
+
+def _days_since(iso_timestamp: str) -> float {
+    if not iso_timestamp {
+        return 1.0;
+    }
+    created = time.strptime(iso_timestamp, "%Y-%m-%dT%H:%M:%SZ");
+    delta_seconds: float = time.time() - time.mktime(created);
+    return max(delta_seconds / 86400.0, 1.0);
 }
 
 """Base commit SHA for `branch` on `full_name`, or None if the branch/repo

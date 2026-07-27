@@ -72,14 +72,15 @@ triage/
     pr_agent.jac              # NOT an agent on the loop. Human-triggered only.
   integrations/
     ast_parser.jac            # build File/imports graph from a Python repo
-    github.jac                # OAuth + create PR
+    github.jac                # OAuth + create PR + fetch live issues (fetch_open_issues)
   client/
     app.jac                   # cl def:pub — login + dashboard + ranked queue
     cluster_view.jac          # cl — cluster detail + graph visualization
   seed/
     repo/                     # the 18-file seed Python repo (see PLAN.md §Seed Repo)
-    issues.json               # the 20 seed issues
-    seed.jac                  # loads seed/repo + seed/issues.json into the graph
+    seed.jac                  # calls ingest_from_github to load the REAL issue queue
+                               # (github.com/alaramartin/triage-demo/issues) into the graph.
+                               # No local issues.json fixture anymore — see §6 ingest_from_github.
   mocks/
     queue.json                # static mock of get_queue response — for P3 before C3
     cluster_detail.json       # static mock of get_cluster_detail response
@@ -292,6 +293,30 @@ Runs Agent 1, which cascades into 2 → 3 → 4 via graph state. Report:
 ```
 
 If parked: `{ "issue_id": "...", "resolved_to": null, "resolution_method": "none", "parked": true }`
+
+### `ingest_from_github`
+
+Request: `{ "full_name": "alaramartin/triage-demo" }` — `full_name` defaults to the indexed
+repo's own `full_name` if omitted. Fetches that repo's **open issues live from the GitHub REST
+API** (`integrations/github.jac`'s `fetch_open_issues`) and runs each one through the exact
+same Agent 1 → 2 → 3 → 4 cascade as `ingest_issue` (they share `main.jac`'s `_ingest_one`
+helper). `external_id` on the resulting `Issue` nodes is the real GitHub issue number as a
+string, which is what makes `IssueChip` render them as live links back to GitHub. Idempotent —
+issues already present (matched by `external_id`) are skipped, not duplicated, so it's safe to
+call repeatedly as new issues get opened. This is the seeding path now: `seed/seed.jac` calls
+it instead of reading a local fixture, and it's also the mechanism that lets Triage point at
+**any** repo once GitHub auth picks one, not just the hardcoded demo repo. Report:
+
+```json
+{
+    "ok": true,
+    "repo": "alaramartin/triage-demo",
+    "fetched": 20,
+    "ingested": 20,
+    "skipped_existing": 0,
+    "results": [ /* one ingest_issue-shaped report per newly ingested issue */ ]
+}
+```
 
 ### `get_queue`
 

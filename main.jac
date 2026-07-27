@@ -26,8 +26,12 @@ import from agents.ranking {
     weighted_cluster_urgency
 }
 import from agents.pr_agent {
-    build_pr_for_cluster, build_pr_for_issue, preview_issue_fix, IssueFixPreview
+    build_pr_for_cluster,
+    build_pr_for_issue,
+    preview_issue_fix,
+    IssueFixPreview
 }
+import from integrations.github { fetch_open_issues, RemoteIssue }
 
 # ============================== Person 1 — Graph & Agents ==============================
 walker:pub reindex_repo {
@@ -106,6 +110,89 @@ walker:pub debug_blast {
 }
 
 # ======================= Person 2 — Ingestion, LLM & PR action =======================
+# Shared by ingest_issue (one issue at a time, e.g. the live-ingestion demo
+# beat) and ingest_from_github (a whole repo's open issues at once) so both
+# entry points run the exact same Agent 1->2->3->4 cascade and can't drift.
+def _ingest_one(
+    repo: Repo,
+    external_id: str,
+    title: str,
+    body: str,
+    created_at: str,
+    reactions: int,
+    comment_velocity: int
+) -> dict {
+    files: list[File] = [repo->:owns:->][?:File];
+    file_paths: list[str] = [f.path for f in files];
+
+    resolution = resolve_issue(title, body, file_paths, repo_root=repo.repo_path);
+    severity: int = assess_severity(title, body);
+    diff_lines: int = estimate_diff_size(title, body);
+
+    issue: Issue = Issue(
+        external_id=external_id,
+        title=title,
+        body=body,
+        created_at=created_at,
+        severity=severity,
+        estimated_diff_lines=diff_lines,
+        resolution_confidence=resolution.confidence,
+        resolution_method=resolution.method,
+        reactions=reactions,
+        comment_velocity=comment_velocity,
+    );
+    repo +>:owns:+> issue;
+
+    if resolution.path is None {
+        unresolved_matches: list[Unresolved] = [repo->:owns:->][?:Unresolved];
+        unresolved: Unresolved;
+        if len(unresolved_matches) > 0 {
+            unresolved = unresolved_matches[0];
+        } else {
+            unresolved = Unresolved();
+            repo +>:owns:+> unresolved;
+        }
+        unresolved +>:parked:+> issue;
+        unresolved.count += 1;
+        return {
+            "issue_id": jid(issue),
+            "resolved_to": None,
+            "resolution_method": "none",
+            "parked": True
+        };
+    }
+
+    target_matches: list[File] = [
+        f
+        for f in files
+        if f.path == resolution.path
+    ];
+    target: File = target_matches[0];
+    issue +>:resolves_to:+> target;
+
+    # Agent 2 -> 3 -> 4 cascade (blast radius -> clustering -> ranking),
+    # triggered the same way CLAUDE.md #5 describes: writing the resolves_to
+    # edge, then downstream agents re-read graph state fresh rather than
+    # being handed values directly.
+    on_issue_resolved(issue, target, repo);
+
+    clustered_into: str | None = None;
+    issue_clusters: list[Cluster] = [issue->:grouped_in:->];
+    if len(issue_clusters) > 0 {
+        clustered_into = issue_clusters[0].cluster_key;
+    }
+
+    return {
+        "issue_id": jid(issue),
+        "resolved_to": target.path,
+        "resolution_method": resolution.method,
+        "confidence": resolution.confidence,
+        "severity": severity,
+        "clustered_into": clustered_into,
+        "urgency": issue.urgency
+    };
+}
+
 walker:pub ingest_issue {
     has external_id: str;
     has title: str;
@@ -122,77 +209,66 @@ walker:pub ingest_issue {
         }
         repo: Repo = repos[0];
 
-        files: list[File] = [repo->:owns:->][?:File];
-        file_paths: list[str] = [f.path for f in files];
-
-        resolution = resolve_issue(
-            self.title, self.body, file_paths, repo_root=repo.repo_path
+        report _ingest_one(
+            repo,
+            self.external_id,
+            self.title,
+            self.body,
+            self.created_at,
+            self.reactions,
+            self.comment_velocity
         );
-        severity: int = assess_severity(self.title, self.body);
-        diff_lines: int = estimate_diff_size(self.title, self.body);
+    }
+}
 
-        issue: Issue = Issue(
-            external_id=self.external_id,
-            title=self.title,
-            body=self.body,
-            created_at=self.created_at,
-            severity=severity,
-            estimated_diff_lines=diff_lines,
-            resolution_confidence=resolution.confidence,
-            resolution_method=resolution.method,
-            reactions=self.reactions,
-            comment_velocity=self.comment_velocity,
-        );
-        repo +>:owns:+> issue;
+# Pulls a repo's OPEN issues straight from the GitHub REST API and runs each
+# one through the same Agent 1 cascade as ingest_issue - this is what lets
+# Triage point at any real repo's real issue queue instead of a canned
+# issues.json fixture (CLAUDE.md's "nothing should be hardcoded" rule).
+# Safe to call repeatedly: issues already present (matched by external_id,
+# which is the GitHub issue number) are skipped rather than duplicated.
+walker:pub ingest_from_github {
+    has full_name: str = "";
 
-        if resolution.path is None {
-            unresolved_matches: list[Unresolved] = [repo->:owns:->][?:Unresolved];
-            unresolved: Unresolved;
-            if len(unresolved_matches) > 0 {
-                unresolved = unresolved_matches[0];
-            } else {
-                unresolved = Unresolved();
-                repo +>:owns:+> unresolved;
-            }
-            unresolved +>:parked:+> issue;
-            unresolved.count += 1;
-            report {
-                "issue_id": jid(issue),
-                "resolved_to": None,
-                "resolution_method": "none",
-                "parked": True
-            };
+    can ingest with Root entry {
+        repos: list[Repo] = [root-->][?:Repo];
+        if len(repos) == 0 {
+            report {"ok": False, "error": "no repo indexed - call reindex_repo first"};
             disengage;
         }
+        repo: Repo = repos[0];
+        target_full_name: str = self.full_name if self.full_name else repo.full_name;
 
-        target_matches: list[File] = [
-            f
-            for f in files
-            if f.path == resolution.path
-        ];
-        target: File = target_matches[0];
-        issue +>:resolves_to:+> target;
+        already: set[str] = {i.external_id for i in [repo->:owns:->][?:Issue]};
 
-        # Agent 2 -> 3 -> 4 cascade (blast radius -> clustering -> ranking),
-        # triggered by this ingest walker the same way CLAUDE.md #5 describes:
-        # the walker writes the resolves_to edge, then the downstream agents
-        # re-read graph state fresh rather than being handed values directly.
-        on_issue_resolved(issue, target, repo);
-
-        clustered_into: str | None = None;
-        issue_clusters: list[Cluster] = [issue->:grouped_in:->];
-        if len(issue_clusters) > 0 {
-            clustered_into = issue_clusters[0].cluster_key;
+        remote_issues: list[RemoteIssue] = fetch_open_issues(target_full_name);
+        results: list[dict] = [];
+        skipped: int = 0;
+        for ri in remote_issues {
+            if ri.external_id in already {
+                skipped += 1;
+                continue;
+            }
+            results.append(
+                _ingest_one(
+                    repo,
+                    ri.external_id,
+                    ri.title,
+                    ri.body,
+                    ri.created_at,
+                    ri.reactions,
+                    ri.comment_velocity
+                )
+            );
         }
 
         report {
-            "issue_id": jid(issue),
-            "resolved_to": target.path,
-            "resolution_method": resolution.method,
-            "confidence": resolution.confidence,
-            "severity": severity,
-            "clustered_into": clustered_into,
-            "urgency": issue.urgency
+            "ok": True,
+            "repo": target_full_name,
+            "fetched": len(remote_issues),
+            "ingested": len(results),
+            "skipped_existing": skipped,
+            "results": results
         };
     }
 }
@@ -494,7 +570,9 @@ walker:pub get_queue {
                 )
             );
         }
-        cluster_views.sort(key=lambda (c: ClusterView) { return c.urgency; }, reverse=True);
+        cluster_views.sort(
+            key=lambda (c: ClusterView) { return c.urgency; }, reverse=True
+        );
 
         singleton_views: list[SingletonView] = [];
         unresolved_views: list[UnresolvedView] = [];

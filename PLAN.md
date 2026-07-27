@@ -1471,9 +1471,11 @@ run**, or your top cluster will be greyed out at the bottom of the page when you
       straight to the repo picker. The picker therefore lists only the repo we hold a PAT
       for, sourced live from the graph — **not** a fabricated repo list. A dashed
       "Connect more repositories" card is shown disabled and labelled as pending auth.
-- ⚠️ **Issue links are best-effort.** The seed issues use `SEED-nn` external IDs, which are
-      not real GitHub issue numbers, so chips only become links when the external ID is
-      numeric (i.e. real ingested GitHub issues). Seed chips render as plain chips.
+- ✅ **Issue links are real (as of 2026-07-26).** Seeding now ingests from
+      `github.com/alaramartin/triage-demo/issues` via `ingest_from_github`, not a
+      `SEED-nn`-labelled fixture — every ingested issue's `external_id` is the real GitHub
+      issue number, so `IssueChip` renders every chip as a live link back to GitHub. See the
+      2026-07-26 entry above.
 - `client/mock_data.cl.jac` and `mocks/*.json` are **not** imported by any screen. They stay
   as the offline fallback fixtures they were built as.
 
@@ -1504,3 +1506,46 @@ npm install          # once - root devDependency on the Tailwind CLI
 - **Re-run `./client/build_css.sh` after adding any new Tailwind class to a `.cl.jac` file**,
   or that class will silently have no effect. `./client/build_css.sh --watch` alongside
   `jac start --dev` if you're iterating on styling.
+
+## 2026-07-26 — `seed/issues.json` retired, real GitHub issues now the source of truth
+
+The 20 synthetic issues that used to live in `seed/issues.json` are now real issues on
+`github.com/alaramartin/triage-demo/issues` (#8–#27 — #1–#7 were already taken by PRs opened
+during earlier `generate_pr` testing). `seed/issues.json` is deleted; nothing in the codebase
+reads it anymore.
+
+**What changed:**
+
+- `integrations/github.jac`: new `fetch_open_issues(full_name) -> list[RemoteIssue]`. Real
+  GitHub REST call (`GET /repos/{full_name}/issues?state=open`), paginated, filters out pull
+  requests (they share the issues endpoint — anything with a `pull_request` key is skipped).
+  `comment_velocity` is derived (comments / days-since-created, min 1 day) since GitHub has no
+  such field natively.
+- `main.jac`: the per-issue resolve → severity/diff estimate → cluster → rank logic that used
+  to live inside `ingest_issue`'s walker body is now a shared `_ingest_one()` function, so it
+  can't drift between entry points. New `walker:pub ingest_from_github` fetches a repo's live
+  open issues and runs each through `_ingest_one()`, skipping any `external_id` (the GitHub
+  issue number) already ingested — safe to re-run as new issues get opened.
+- `seed/seed.jac`: now POSTs to `/walker/ingest_from_github` instead of reading a local JSON
+  fixture. `TRIAGE_GITHUB_REPO` env var overrides which repo it seeds from.
+
+**Why this matters beyond "looks more legit":** `external_id` on ingested issues is now the
+real GitHub issue number (a numeric string), which is exactly what `client/components/
+IssueChip.cl.jac` already checked for to render a chip as a real `github.com/.../issues/N`
+link instead of a dead-end label — that codepath had been sitting unused since P3 built it
+against `SEED-nn` fixtures. It's live now with zero client changes. This is also the mechanism
+that lets Triage point at **any** repo's real issue queue, not just the hardcoded demo one, once
+GitHub auth is wired up to let a user pick a repo — `ingest_from_github` already takes
+`full_name` as a parameter for exactly that reason.
+
+**Verified live:** restarted the server (it was running the pre-change compiled `main.jac` and
+returned a bare `401 Unauthorized` for the unknown new walker — a stale server process, not a
+real auth failure), re-ran `reindex_repo`, then `ingest_from_github` — fetched 20, ingested 20,
+0 skipped. `get_queue` came back with the same shape as before: 3 clusters (`core/validation.py`
+× 4 issues / blast 14 / urgency 6.76, `models/product.py` × 2, `services/upload.py` × 2), 8
+singletons, 4 unresolved. Numbers match the pre-migration `issues.json` run, as expected — same
+issue text, now sourced from GitHub instead of a fixture.
+
+**Data honesty update (CLAUDE.md §2):** the "Issue links are best-effort" caveat in the Data
+honesty section above is now stale — issue chips resolve to real GitHub links for every
+ingested issue, not just a hypothetical numeric-external_id case.
