@@ -4,16 +4,14 @@ def:pub ResolutionBadge(method: str) -> JsxElement {
     label = "traceback"
         if method == "explicit"
         else ("inferred" if method == "llm" else "unresolved");
-    tone = "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+    tone = "border-[var(--color-green)]/40 bg-[var(--color-green-soft)] text-[var(--color-green)]"
         if method == "explicit"
         else (
-            "bg-sky-500/15 text-sky-300 border-sky-500/30"
-                if method == "llm"
-                else "bg-zinc-500/15 text-zinc-300 border-zinc-500/30"
+            "border-[var(--color-border-strong)] bg-[var(--color-surface-raised)] text-[var(--color-text-muted)]"
         );
     return
         <span
-            className={"inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium tracking-wide " + tone}
+            className={"inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] " + tone}
         >
             {label}
         </span>;

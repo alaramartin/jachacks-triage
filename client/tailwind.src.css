@@ -1,0 +1,50 @@
+/* SOURCE stylesheet. Edit this file, then regenerate client/global.css:
+ *
+ *     ./client/build_css.sh
+ *
+ * Why the extra step: jac.toml's [plugins.client.vite] table is NOT honored by
+ * jac 0.34.7 - the generated .jac/client/configs/vite.dev.config.js contains no
+ * tailwindcss() plugin (verified by reading it), and that config is regenerated
+ * from scratch on every `jac start`, so hand-patching it does not survive.
+ * Without the plugin, `@import "tailwindcss"` is passed through raw and ZERO
+ * utility classes are emitted - which is exactly why the app rendered as
+ * unstyled text on a black page. So we precompile with the Tailwind CLI and let
+ * jac copy the finished stylesheet.
+ */
+
+@import "tailwindcss";
+
+/* Class names live verbatim in the .cl.jac sources. Relative to THIS file. */
+@source "./**/*.cl.jac";
+
+:root {
+  --color-bg: #08090b;
+  --color-surface: #101216;
+  --color-surface-raised: #171a20;
+  --color-border: #22262e;
+  --color-border-strong: #333944;
+  --color-text: #f2f4f7;
+  --color-text-muted: #878e9c;
+
+  /* Green = the thing you click to act. Orange = what the graph is shouting about. */
+  --color-green: #3fd68c;
+  --color-green-soft: #3fd68c1f;
+  --color-orange: #ff8b3d;
+  --color-orange-soft: #ff8b3d1f;
+}
+
+html,
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Sleek, flat: no shadows anywhere. Depth comes from 1px borders + surface steps. */
+::selection {
+  background: var(--color-orange-soft);
+}
+
+input[type="range"] {
+  accent-color: var(--color-orange);
+}

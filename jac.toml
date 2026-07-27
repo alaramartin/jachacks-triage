@@ -42,6 +42,14 @@ typescript = "^5.3.3"
 base_route_app = "app"
 port = 8000
 
+# DEAD TABLE - jac 0.34.7 ignores it. The vite config it generates
+# (.jac/client/configs/vite.dev.config.js) has no tailwindcss() plugin, and it is
+# regenerated on every `jac start`, so patching it by hand does nothing either.
+# Consequence: Tailwind never compiles and every utility class silently does
+# nothing. We work around it by precompiling the stylesheet ourselves -
+# `./client/build_css.sh` turns client/tailwind.src.css into client/global.css.
+# Left here in case a later jac version starts reading it. See PLAN.md's
+# "WEBSITE UI" gotcha before touching this.
 [plugins.client.vite]
 plugins = ["tailwindcss()"]
 lib_imports = ["import tailwindcss from '@tailwindcss/vite'"]

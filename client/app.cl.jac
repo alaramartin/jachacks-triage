@@ -8,7 +8,9 @@ import from .cluster_view { ClusterView }
 
 def:pub app -> JsxElement {
     return
-        <Router>
+        <Router
+            future={{"v7_startTransition": True, "v7_relativeSplatPath": True}}
+        >
             <Routes>
                 <Route path="/" element={<LoginScreen/>}/>
                 <Route path="/repos" element={<RepoPickerScreen/>}/>

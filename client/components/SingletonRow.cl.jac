@@ -1,41 +1,50 @@
-"""One singleton issue row on the ranked queue - same visual weight as a cluster row."""
+"""One singleton issue row - same language as a cluster row, deliberately
+quieter and more compact (no orange, no action buttons) so the eye lands on the
+clusters first."""
 
 import from .ResolutionBadge { ResolutionBadge }
-import from .StatPill { StatPill }
+import from .IssueChip { IssueChip }
 
-def:pub SingletonRow(issue: dict) -> JsxElement {
+def:pub SingletonRow(issue: dict, repo: str = "") -> JsxElement {
     blast_radius = issue["blast_radius"];
     urgency = issue["urgency"] as float;
 
     return
         <div
-            className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4"
+            className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] flex flex-wrap items-center gap-x-5 gap-y-2 px-5 py-3.5"
         >
-            <div className="flex-1 min-w-0 basis-full sm:basis-0">
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                    <span className="text-xs text-zinc-500 font-mono">
-                        {issue["external_id"]}
-                    </span>
-                    <span className="text-xs text-zinc-500 font-mono truncate">
-                        · {issue["target_path"]}
+            <IssueChip
+                external_id={issue["external_id"] as str}
+                title={issue["title"] as str}
+                repo={repo}
+            />
+            <div className="flex-1 min-w-0">
+                <div className="text-[15px] text-[var(--color-text)] truncate">
+                    {issue["title"]}
+                </div>
+                <div className="mt-1 flex items-center gap-2">
+                    <span className="font-mono text-xs text-[var(--color-text-muted)] truncate">
+                        {issue["target_path"]}
                     </span>
                     <ResolutionBadge method={issue["resolution_method"]}/>
                 </div>
-                <h3 className="text-base font-medium text-zinc-200 truncate">
-                    {issue["title"]}
-                </h3>
             </div>
-            <div className="flex items-center gap-6 shrink-0">
-                <StatPill
-                    value={str(blast_radius) + (
-                        " file" if blast_radius == 1 else " files"
-                    )}
-                    label="blast radius"
-                />
-                <StatPill value={f"{urgency:.2f}"} label="urgency"/>
-                <span className="text-xs text-zinc-500 w-14 text-right shrink-0">
-                    sev {str(issue["severity"])}
+            <div
+                className="flex items-center gap-5 shrink-0 text-xs text-[var(--color-text-muted)]"
+            >
+                <span>
+                    <span className="text-base font-semibold text-[var(--color-text)]">
+                        {str(blast_radius)}
+                    </span>
+                    {" file downstream" if blast_radius == 1 else " files downstream"}
                 </span>
+                <span>
+                    <span className="text-base font-semibold text-[var(--color-text)]">
+                        {f"{urgency:.2f}"}
+                    </span>
+                    {" urgency"}
+                </span>
+                <span className="w-12 text-right">sev {str(issue["severity"])}</span>
             </div>
         </div>;
 }

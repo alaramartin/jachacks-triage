@@ -1345,3 +1345,104 @@ on one node; ranking fires because a property changed. The graph is the coordina
 _(If asked about the personalization sliders: "The defaults are blast-radius-dominant — the
 structural signal you can only get from the graph. The weights let a maintainer tune the other
 terms to taste, but the graph is doing the heavy lifting no matter where you set them.")_
+
+---
+
+# WEBSITE UI — visual pass (dark / green + orange)
+
+Restyle of the existing four screens from Alara's Excalidraw sketches. Structure and data
+flow are already live; this is a **visual + layout** pass, not a rewrite. Vibe: sleek,
+modern, flat. Black background, green + orange accents, thin 1px borders, no heavy shadows,
+no gradients beyond a hairline.
+
+**Palette (single source of truth: `client/global.css`)**
+
+| Token                    | Value     | Used for                                     |
+| ------------------------ | --------- | -------------------------------------------- |
+| `--color-bg`             | `#08090b` | page background (near-black)                 |
+| `--color-surface`        | `#101216` | cards, rows                                  |
+| `--color-surface-raised` | `#171a20` | hover / nested rows                          |
+| `--color-border`         | `#22262e` | every border (1px, no shadows)                |
+| `--color-text`           | `#f2f4f7` | primary text                                 |
+| `--color-text-muted`     | `#878e9c` | labels, paths, meta                          |
+| `--color-green`          | `#3fd68c` | **action** — Generate PR, resolved/positive  |
+| `--color-orange`         | `#ff8b3d` | **emphasis** — blast radius, view detail, #1 |
+
+Green = the thing you click to act. Orange = the thing the graph is shouting about.
+
+## Tasks
+
+- [x] **Palette + base** — `client/tailwind.src.css` holds the tokens above; body on
+      `--color-bg`, antialiased. Old red `--color-accent` removed.
+- [x] **Tailwind actually compiles** — see the gotcha below. This was the real reason the app
+      looked unstyled, not missing classes.
+- [x] **Landing** (`screens/LoginScreen.cl.jac`) — centered `Tri`+orange`age` wordmark,
+      one-line tagline, green one-click "Log in with GitHub" button, WIP note under it.
+- [x] **Repo picker** (`screens/RepoPickerScreen.cl.jac`) — "Your projects" heading, card grid,
+      live repo name + file count, orange hover border. Second tile is a disabled
+      "Connect more repositories" placeholder labelled as pending OAuth.
+- [x] **Ranked queue** (`screens/QueueScreen.cl.jac`) — repo name + back link top-left,
+      ranking-priorities control top-right, cluster rows, then standalone issues, then the
+      parked bucket.
+- [x] **Cluster row** (`components/ClusterRow.cl.jac`) — sketch's three columns: issue chips
+      left, title + root cause + blast/urgency middle, and behind a divider a green
+      **GENERATE PR** over an orange **View detail**. `#1` cluster gets an orange border.
+- [x] **Singleton + unresolved rows** — same language, quieter (no orange, no buttons, more
+      compact) so the eye lands on clusters first.
+- [x] **Settings / priorities panel** (`components/SettingsPanel.cl.jac`) — collapsible,
+      top-right of the queue. Sliders write to the real `set_weights` walker and refetch
+      `get_queue`.
+- [x] **Cluster detail** (`cluster_view.cl.jac`) — description up top, big bordered graph panel
+      as the hero with stats + legend in its header, root cause / proposed fix side by side,
+      member issues below. Also now surfaces the real `existing_pr` link when one exists.
+- [x] **Graph view** (`components/GraphView.cl.jac`) — orange target, green dependents fading
+      by hop, grey unreached. Wider canvas, rings rotated off each other and labels alternating
+      above/below so filenames stop colliding. Ring-by-ring reveal kept.
+- [x] **Browser check** — all four screens loaded in a real (headless Chrome) browser against
+      the live server; screenshots reviewed, no client-side runtime errors in the dev log.
+      **Not** click-tested: the ranking sliders and the Generate PR button (the walkers behind
+      both are covered by `main.test.jac`, but the click paths deserve one manual pass).
+
+## Data honesty (check at the end — CLAUDE.md §2)
+
+- ✅ **Real:** repo name + file count, clusters, member issues, blast radius, urgency,
+      severity, resolution method, cluster detail, graph nodes/edges, PR generation, and the
+      ranking weights (all from `get_queue` / `get_cluster_detail` / `generate_pr` /
+      `set_weights`).
+- ⚠️ **WIP — GitHub OAuth.** "Log in with GitHub" does not authenticate; it navigates
+      straight to the repo picker. The picker therefore lists only the repo we hold a PAT
+      for, sourced live from the graph — **not** a fabricated repo list. A dashed
+      "Connect more repositories" card is shown disabled and labelled as pending auth.
+- ⚠️ **Issue links are best-effort.** The seed issues use `SEED-nn` external IDs, which are
+      not real GitHub issue numbers, so chips only become links when the external ID is
+      numeric (i.e. real ingested GitHub issues). Seed chips render as plain chips.
+- `client/mock_data.cl.jac` and `mocks/*.json` are **not** imported by any screen. They stay
+  as the offline fallback fixtures they were built as.
+
+## ⚠️ Gotcha found during this pass — Tailwind was emitting ZERO utilities
+
+The app rendered as unstyled text on a black page, and it was not the class names — it was
+that Tailwind never ran.
+
+- `jac.toml`'s `[plugins.client.vite]` table (`plugins = ["tailwindcss()"]`) is **not honored
+  by jac 0.34.7**. The generated `.jac/client/configs/vite.dev.config.js` contains only jac's
+  own plugins plus `react()` — no `tailwindcss()`.
+- That config is **regenerated from scratch on every `jac start`**, so hand-patching it in
+  `.jac/` does not survive a restart (verified with a marker comment).
+- Without the plugin, `@import "tailwindcss"` is passed through raw: the served CSS literally
+  contained `@layer utilities { @tailwind utilities; }`, i.e. zero compiled classes.
+- Adding `@source` to the CSS does not help on its own — Tailwind skips `.gitignore`d paths,
+  and the copy it would scan from lives under the ignored `.jac/`.
+
+**Fix in place:** we precompile the stylesheet ourselves.
+
+```
+npm install          # once - root devDependency on the Tailwind CLI
+./client/build_css.sh   # regenerates client/global.css from client/tailwind.src.css
+```
+
+- Edit **`client/tailwind.src.css`**, never `client/global.css` (generated, and marked
+  `linguist-generated=true` in `.gitattributes` so it does not dent the repo's Jac language %).
+- **Re-run `./client/build_css.sh` after adding any new Tailwind class to a `.cl.jac` file**,
+  or that class will silently have no effect. `./client/build_css.sh --watch` alongside
+  `jac start --dev` if you're iterating on styling.

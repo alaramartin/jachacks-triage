@@ -1,10 +1,18 @@
-"""One expandable cluster row on the ranked queue - the money-shot element."""
+"""One cluster row on the ranked queue - the money-shot element.
+
+Sketch layout: stacked issue chips on the left, the shared root cause in the
+middle, and (behind a vertical divider) the two actions on the right - green
+GENERATE PR over an orange View detail. Clicking the middle expands the member
+issues with severity + how each was resolved.
+"""
 
 import from .ResolutionBadge { ResolutionBadge }
-import from .StatPill { StatPill }
+import from .IssueChip { IssueChip }
 
 def:pub ClusterRow(
     cluster: dict,
+    rank: int,
+    repo: str,
     expanded: bool,
     onToggle: Callable[[], None],
     onGeneratePr: Callable[[str], None],
@@ -13,6 +21,12 @@ def:pub ClusterRow(
     blast_radius = cluster["blast_radius"];
     urgency = cluster["urgency"] as float;
     issues = cluster["issues"] as list[dict];
+    top = rank == 1;
+
+    # Keep the chip stack from running away on a big cluster - the sketch shows
+    # three or four, and the count is already on the badge.
+    visible = issues[:4];
+    overflow = len(issues) - len(visible);
 
     def handle_toggle(_e: MouseEvent) {
         onToggle();
@@ -32,9 +46,11 @@ def:pub ClusterRow(
         onOpenDetail(cluster["id"] as str);
     }
 
+    border_cls = "border-[var(--color-orange)]/45" if top else "border-[var(--color-border)]";
+
     return
         <div
-            className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden"
+            className={"rounded-2xl border bg-[var(--color-surface)] overflow-hidden transition-colors " + border_cls}
         >
             <div
                 onClick={handle_toggle}
@@ -42,37 +58,72 @@ def:pub ClusterRow(
                 role="button"
                 tabIndex={0}
                 aria-expanded={expanded}
-                className="w-full flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4 text-left hover:bg-[var(--color-surface-raised)] transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]"
+                className="flex flex-col lg:flex-row lg:items-stretch cursor-pointer hover:bg-[var(--color-surface-raised)] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-orange)]"
             >
-                <div className="flex-1 min-w-0 basis-full sm:basis-0">
-                    <div className="flex items-center gap-2 mb-1">
+                <div className="flex flex-wrap lg:flex-col gap-2 p-5 shrink-0 lg:w-56">
+                    {for issue in visible {
+                        <IssueChip
+                            key={issue["id"]}
+                            external_id={issue["external_id"] as str}
+                            title={issue["title"] as str}
+                            repo={repo}
+                        />
+                    }}
+                    {if overflow > 0 {
                         <span
-                            className="rounded bg-[var(--color-accent-soft)] text-[var(--color-accent)] text-[11px] font-semibold px-1.5 py-0.5"
+                            key="overflow"
+                            className="px-3 py-1 font-mono text-[11px] text-[#5b616e]"
                         >
-                            CLUSTER · {str(cluster["issue_count"])} issues
+                            +{str(overflow)} more
                         </span>
-                        <span className="text-xs text-zinc-500 font-mono truncate">
+                    }}
+                </div>
+                <div className="flex-1 min-w-0 px-5 py-5 lg:pl-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                            className="rounded-full bg-[var(--color-orange-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--color-orange)]"
+                        >
+                            {"#" + str(rank)} · cluster of {str(cluster["issue_count"])}
+                        </span>
+                        <span className="font-mono text-xs text-[var(--color-text-muted)] truncate">
                             {cluster["target_path"]}
                         </span>
                     </div>
-                    <h3 className="text-base font-semibold text-zinc-100 truncate">
+                    <h3 className="mt-2 text-[17px] font-semibold leading-snug text-[var(--color-text)]">
                         {cluster["title"]}
                     </h3>
+                    <div className="mt-3 flex items-center gap-5 text-xs text-[var(--color-text-muted)]">
+                        <span>
+                            <span className="text-lg font-bold text-[var(--color-orange)]">
+                                {str(blast_radius)}
+                            </span>
+                            {" file downstream" if blast_radius == 1 else " files downstream"}
+                        </span>
+                        <span>
+                            <span className="text-lg font-semibold text-[var(--color-text)]">
+                                {f"{urgency:.2f}"}
+                            </span>
+                            {" urgency"}
+                        </span>
+                        <span className="hidden sm:inline">
+                            max sev {str(cluster["max_severity"])}
+                        </span>
+                    </div>
                 </div>
-                <div className="flex items-center gap-6 shrink-0">
-                    <StatPill
-                        value={str(blast_radius) + (
-                            " file" if blast_radius == 1 else " files"
-                        )}
-                        label="blast radius"
-                        emphasis={True}
-                    />
-                    <StatPill value={f"{urgency:.2f}"} label="urgency"/>
+                <div
+                    className="flex flex-row lg:flex-col justify-center gap-2.5 p-5 shrink-0 border-t lg:border-t-0 lg:border-l border-[var(--color-border)]"
+                >
                     <button
                         onClick={handle_generate}
-                        className="shrink-0 rounded-lg bg-[var(--color-accent)] text-white text-sm font-semibold px-4 py-2 hover:opacity-90"
+                        className="rounded-lg bg-[var(--color-green)] px-4 py-2.5 text-[13px] font-semibold uppercase tracking-wide text-[#07130d] transition-colors hover:bg-[#54e79c]"
                     >
                         Generate PR
+                    </button>
+                    <button
+                        onClick={handle_open_detail}
+                        className="rounded-lg border border-[var(--color-orange)]/60 px-4 py-2.5 text-[13px] font-medium text-[var(--color-orange)] transition-colors hover:bg-[var(--color-orange-soft)]"
+                    >
+                        View detail
                     </button>
                 </div>
             </div>
@@ -83,20 +134,18 @@ def:pub ClusterRow(
                     {[
                         <div
                             key={issue["id"]}
-                            className="flex items-center justify-between gap-4 px-5 py-3 pl-10"
+                            className="flex items-center justify-between gap-4 px-5 py-3"
                         >
-                            <div className="flex items-center gap-2 min-w-0">
-                                <span
-                                    className="text-xs text-zinc-500 font-mono shrink-0"
-                                >
+                            <div className="flex items-center gap-3 min-w-0">
+                                <span className="font-mono text-xs text-[#5b616e] shrink-0">
                                     {issue["external_id"]}
                                 </span>
-                                <span className="text-sm text-zinc-300 truncate">
+                                <span className="text-sm text-[var(--color-text-muted)] truncate">
                                     {issue["title"]}
                                 </span>
                             </div>
                             <div className="flex items-center gap-3 shrink-0">
-                                <span className="text-xs text-zinc-500">
+                                <span className="text-xs text-[#5b616e]">
                                     sev {str(issue["severity"])}
                                 </span>
                                 <ResolutionBadge method={issue["resolution_method"]}/>
@@ -104,13 +153,6 @@ def:pub ClusterRow(
                         </div>
                         for issue in issues
                     ]}
-                    <button
-                        key="view-detail"
-                        onClick={handle_open_detail}
-                        className="w-full text-left px-5 py-3 pl-10 text-sm font-medium text-[var(--color-accent)] hover:bg-[var(--color-surface-raised)]"
-                    >
-                        View graph &amp; root cause →
-                    </button>
                 </div>
             }}
         </div>;

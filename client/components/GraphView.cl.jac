@@ -16,17 +16,25 @@ concrete type (Callable params, len(), string concat, arithmetic).
 import from react { useEffect }
 
 def ring_positions(
-    nodes: list[dict], radius: float, cx: float, cy: float, positions: dict[str, dict]
+    nodes: list[dict],
+    radius: float,
+    cx: float,
+    cy: float,
+    positions: dict[str, dict],
+    angle_offset: float = 0.0
 ) -> None {
     count = len(nodes);
     if count == 0 {
         return;
     }
     for (i, n) in enumerate(nodes) {
-        angle = 2.0 * Math.PI * (i * 1.0) / (count * 1.0);
+        angle = angle_offset + 2.0 * Math.PI * (i * 1.0) / (count * 1.0);
+        # Ring neighbours sit at similar y near the horizontal axis, so their
+        # labels collide. Alternate above/below to keep every path readable.
         positions[n["id"] as str] = {
             "x": cx + radius * Math.cos(angle),
-            "y": cy + radius * Math.sin(angle)
+            "y": cy + radius * Math.sin(angle),
+            "label_above": (i % 2) == 1
         };
     }
 }
@@ -44,20 +52,22 @@ def node_radius(n: dict) -> float {
     return 6.5;
 }
 
+# Orange = the node everything is landing on. Green fading outward = what it
+# reaches. Grey = never reached.
 def node_fill(n: dict) -> str {
     if n["role"] == "target" {
-        return "#ff5d5d";
+        return "#ff8b3d";
     }
     if n["role"] == "neutral" {
-        return "#3f4657";
+        return "#333944";
     }
     if n["hops"] == 1 {
-        return "#4ade80";
+        return "#3fd68c";
     }
     if n["hops"] == 2 {
-        return "#22c55e";
+        return "#2eae72";
     }
-    return "#15803d";
+    return "#1f7a51";
 }
 
 # Reveal order: target first, then ring-by-ring outward. Neutral files were
@@ -93,8 +103,8 @@ def:pub GraphView(graph: dict) -> JsxElement {
         []
     );
 
-    width: float = 640.0;
-    height: float = 460.0;
+    width: float = 780.0;
+    height: float = 500.0;
     cx: float = width / 2.0;
     cy: float = height / 2.0 - 20.0;
 
@@ -129,13 +139,18 @@ def:pub GraphView(graph: dict) -> JsxElement {
 
     positions: dict[str, dict] = {};
     if len(target_nodes) > 0 {
-        positions[target_nodes[0]["id"] as str] = {"x": cx, "y": cy};
+        positions[target_nodes[0]["id"] as str] = {
+            "x": cx, "y": cy, "label_above": False
+        };
     }
-    ring_positions(hop1, 110.0, cx, cy, positions);
-    ring_positions(hop2, 190.0, cx, cy, positions);
-    ring_positions(hop3, 262.0, cx, cy, positions);
+    # Each ring is rotated off the last so nodes don't stack up along one spoke.
+    ring_positions(hop1, 118.0, cx, cy, positions, 0.4);
+    ring_positions(hop2, 218.0, cx, cy, positions, 0.15);
+    ring_positions(hop3, 310.0, cx, cy, positions, 0.55);
     for (i, n) in enumerate(neutral) {
-        positions[n["id"] as str] = {"x": 36.0 + (i * 1.0) * 84.0, "y": height - 22.0};
+        positions[n["id"] as str] = {
+            "x": 44.0 + (i * 1.0) * 92.0, "y": height - 20.0, "label_above": False
+        };
     }
 
     node_by_id: dict[str, dict] = {};
@@ -164,7 +179,7 @@ def:pub GraphView(graph: dict) -> JsxElement {
                         y1={from_pos["y"] as float}
                         x2={to_pos["x"] as float}
                         y2={to_pos["y"] as float}
-                        stroke="#2a3143"
+                        stroke="#262b36"
                         strokeWidth={1.2}
                         opacity={1.0 if revealed >= edge_step else 0.0}
                         style={{"transition": "opacity 300ms ease"}}
@@ -190,15 +205,15 @@ def:pub GraphView(graph: dict) -> JsxElement {
                             cy={py}
                             r={r}
                             fill={node_fill(n)}
-                            stroke="#0b0e14"
+                            stroke="#08090b"
                             strokeWidth={2}
                         />
                         <text
                             x={px}
-                            y={py + r + 12.0}
+                            y={(py - r - 6.0) if pos["label_above"] else (py + r + 12.0)}
                             textAnchor="middle"
-                            fontSize="9"
-                            fill="#8b93a7"
+                            fontSize="9.5"
+                            fill="#878e9c"
                         >
                             {n["label"] as str}
                         </text>

@@ -1,10 +1,10 @@
-"""Repo picker - lists the user's repos. Only one (the seed demo repo).
+"""Repo picker - "your projects" grid.
 
-LIVE DATA: repo name/file count come from walker/get_queue against the real
-indexed graph. Full GitHub-account repo listing stays an accepted, documented
-scope cut (CLAUDE.md/PLAN.md: OAuth login is the first thing cut if it fights
-us - it adds nothing to the graph story) - this repo is the only one in scope
-for the demo either way.
+LIVE DATA: the card's repo name and file count come from walker/get_queue against
+the real indexed graph. We deliberately do NOT fabricate a list of other repos -
+GitHub OAuth is WIP (see PLAN.md "WEBSITE UI"), so the only repo we can speak for
+is the one we hold a PAT for. The second tile is an explicitly disabled
+placeholder that says so rather than inventing repo names.
 """
 
 import from "@jac/runtime" { useNavigate }
@@ -33,30 +33,57 @@ def:pub RepoPickerScreen -> JsxElement {
         nav("/queue");
     }
 
+    owner = repo_name.split("/")[0] if "/" in repo_name else "";
+    short_name = repo_name.split("/")[-1];
+
     return
-        <div className="min-h-screen flex flex-col items-center justify-center px-4">
-            <div className="w-full max-w-md">
-                <h2 className="text-xl font-semibold text-zinc-100 mb-1">
-                    Choose a repository
-                </h2>
-                <p className="text-sm text-zinc-500 mb-6">
-                    (single demo repo - live GitHub account listing is a scope cut)
-                </p>
+        <div className="min-h-screen px-6 sm:px-12 py-12 max-w-5xl mx-auto">
+            <div className="flex items-baseline gap-3">
+                <h1 className="text-xl font-semibold tracking-tight text-[var(--color-text)]">
+                    Your projects
+                </h1>
+                <span className="text-xs text-[var(--color-text-muted)]">
+                    repositories Triage has indexed
+                </span>
+            </div>
+            <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 <button
                     onClick={handle_select}
                     disabled={loading}
-                    className="w-full flex items-center justify-between rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 hover:bg-[var(--color-surface-raised)] transition-colors text-left disabled:opacity-50"
+                    className="group text-left rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 transition-colors hover:border-[var(--color-orange)] hover:bg-[var(--color-surface-raised)] disabled:opacity-40"
                 >
-                    <div>
-                        <div className="font-semibold text-zinc-100">
-                            {repo_name}
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                            <div className="text-xs font-mono text-[var(--color-text-muted)] truncate">
+                                {owner}
+                            </div>
+                            <div className="mt-0.5 text-base font-semibold text-[var(--color-text)] truncate">
+                                {short_name}
+                            </div>
                         </div>
-                        <div className="text-xs text-zinc-500 mt-0.5">
-                            {"loading..." if loading else str(file_count) + " files indexed"}
-                        </div>
+                        <span
+                            className="shrink-0 text-[var(--color-text-muted)] transition-colors group-hover:text-[var(--color-orange)]"
+                        >
+                            →
+                        </span>
                     </div>
-                    <span className="text-zinc-500">→</span>
+                    <div className="mt-6 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+                        <span
+                            className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-green)]"
+                        />
+                        {"indexing..." if loading else str(file_count) + " files indexed"}
+                    </div>
                 </button>
+                <div
+                    className="rounded-xl border border-dashed border-[var(--color-border)] p-5 opacity-60"
+                >
+                    <div className="text-base font-medium text-[var(--color-text-muted)]">
+                        Connect more repositories
+                    </div>
+                    <div className="mt-6 text-xs text-[#5b616e]">
+                        GitHub OAuth is a work in progress. Only repositories with a configured token appear here.
+                    </div>
+                </div>
             </div>
         </div>;
 }
