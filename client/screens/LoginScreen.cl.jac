@@ -115,6 +115,13 @@ def:pub LoginScreen -> JsxElement {
     async can with entry {
         code = _query_param(location.search, "code");
         oauth_error = _query_param(location.search, "error_description");
+        # The OAuth redirect_uri is whatever origin the browser is actually on,
+        # NOT a build-time TRIAGE_APP_URL. A hosted deploy can be handed a new
+        # subdomain on every redeploy, and pinning the callback to an env var
+        # is circular there: fixing the var requires a redeploy, which changes
+        # the URL again. Reading it off `window` converges immediately, and it
+        # is identical to APP_URL when running on localhost.
+        origin = window.location.origin;
 
         if oauth_error {
             error = oauth_error;
@@ -125,7 +132,7 @@ def:pub LoginScreen -> JsxElement {
         if code {
             # Back from GitHub's consent screen.
             signing_in = True;
-            login_result = root spawn github_login(code=code);
+            login_result = root spawn github_login(code=code, redirect_uri=origin);
             if login_result.reports and len(login_result.reports) > 0 {
                 resp = login_result.reports[0];
                 if resp["ok"] {
@@ -141,7 +148,7 @@ def:pub LoginScreen -> JsxElement {
             return;
         }
 
-        result = root spawn github_status();
+        result = root spawn github_status(redirect_uri=origin);
         if result.reports and len(result.reports) > 0 {
             status = result.reports[0];
             authed = status["authenticated"];
