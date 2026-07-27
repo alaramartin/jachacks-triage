@@ -32,6 +32,7 @@ import from agents.pr_agent {
     preview_issue_fix,
     IssueFixPreview
 }
+import os;
 import time;
 import from integrations.github {
     fetch_open_issues,
@@ -124,6 +125,19 @@ def _active_repo() -> Repo | None {
     return best;
 }
 
+# ============================== Showcase mode ==============================
+# The public JacHammer deploy runs with TRIAGE_SHOWCASE=1. Every by llm() call
+# in Triage targets a LOCAL Ollama (jac.toml, agents/pr_agent.jac) and a hosted
+# pod has no Ollama and no API key, so in showcase mode the app deliberately
+# stops at the repo picker: login and "Your projects" are real and live, and
+# every walker that would reach an LLM refuses immediately instead of hanging
+# the pod for minutes. Unset locally => nothing below changes behavior at all.
+glob SHOWCASE: bool = os.environ.get("TRIAGE_SHOWCASE", "") not in ["", "0", "false"];
+glob DEMO_VIDEO_URL: str = os.environ.get("TRIAGE_DEMO_VIDEO_URL", "");
+glob SHOWCASE_MESSAGE: str =
+    "This is the hosted showcase build - triage runs on a local model, so indexing, "
+    "clustering and PR generation are disabled here. Watch the demo video instead.";
+
 # ============================== GitHub auth + repo selection ==============================
 # Single round trip for the login screen: is anyone logged in, and if not,
 # where do we send the browser? `authenticated` is the only thing the client
@@ -148,6 +162,8 @@ walker:pub github_status {
                 "avatar_url": "",
                 "oauth_configured": oauth_configured(),
                 "token_available": bool(GITHUB_TOKEN),
+                "showcase": SHOWCASE,
+                "demo_video_url": DEMO_VIDEO_URL,
                 "authorize_url": authorize_url(callback) if oauth_configured() else ""
             };
             disengage;
@@ -165,6 +181,8 @@ walker:pub github_status {
                 "avatar_url": auth.avatar_url,
                 "oauth_configured": oauth_configured(),
                 "token_available": bool(GITHUB_TOKEN),
+                "showcase": SHOWCASE,
+                "demo_video_url": DEMO_VIDEO_URL,
                 "authorize_url": authorize_url(callback) if oauth_configured() else ""
             };
             disengage;
@@ -181,6 +199,8 @@ walker:pub github_status {
                     "avatar_url": user.avatar_url,
                     "oauth_configured": oauth_configured(),
                     "token_available": bool(GITHUB_TOKEN),
+                    "showcase": SHOWCASE,
+                    "demo_video_url": DEMO_VIDEO_URL,
                     "authorize_url": authorize_url(callback)
                         if oauth_configured()
                         else ""
@@ -197,6 +217,8 @@ walker:pub github_status {
             "avatar_url": "",
             "oauth_configured": oauth_configured(),
             "token_available": bool(GITHUB_TOKEN),
+            "showcase": SHOWCASE,
+            "demo_video_url": DEMO_VIDEO_URL,
             "authorize_url": authorize_url(callback) if oauth_configured() else ""
         };
     }
@@ -326,6 +348,10 @@ walker:pub select_repo {
     has repo_url: str;
 
     can select with Root entry {
+        if SHOWCASE {
+            report {"ok": False, "error": SHOWCASE_MESSAGE};
+            disengage;
+        }
         token: str = _session_token();
         full_name: str = parse_repo_full_name(self.repo_url);
         if not full_name {
@@ -417,6 +443,10 @@ walker:pub reindex_repo {
     has full_name: str;
 
     can build with Root entry {
+        if SHOWCASE {
+            report {"ok": False, "error": SHOWCASE_MESSAGE};
+            disengage;
+        }
         existing: list[Repo] = [root-->][?:Repo, full_name==self.full_name];
         repo: Repo;
         if len(existing) > 0 {
@@ -583,6 +613,10 @@ walker:pub ingest_issue {
     has full_name: str = "";
 
     can ingest with Root entry {
+        if SHOWCASE {
+            report {"ok": False, "error": SHOWCASE_MESSAGE};
+            disengage;
+        }
         repo: Repo | None = _repo_by_name(self.full_name)
             if self.full_name
             else _active_repo();
@@ -617,6 +651,10 @@ walker:pub ingest_from_github {
     has limit: int = 0;
 
     can ingest with Root entry {
+        if SHOWCASE {
+            report {"ok": False, "error": SHOWCASE_MESSAGE};
+            disengage;
+        }
         repo: Repo | None = _repo_by_name(self.full_name)
             if self.full_name
             else _active_repo();
@@ -672,6 +710,10 @@ walker:pub generate_pr {
     has cluster_id: str;
 
     can generate with Root entry {
+        if SHOWCASE {
+            report {"ok": False, "error": SHOWCASE_MESSAGE};
+            disengage;
+        }
         cluster: any = None;
         try {
             cluster = jobj(self.cluster_id);
@@ -733,6 +775,10 @@ walker:pub generate_pr_for_issue {
     has issue_id: str;
 
     can generate with Root entry {
+        if SHOWCASE {
+            report {"ok": False, "error": SHOWCASE_MESSAGE};
+            disengage;
+        }
         issue: any = None;
         try {
             issue = jobj(self.issue_id);
@@ -793,6 +839,10 @@ walker:pub get_issue_fix_preview {
     has issue_id: str;
 
     can preview with Root entry {
+        if SHOWCASE {
+            report {"ok": False, "error": SHOWCASE_MESSAGE};
+            disengage;
+        }
         issue: any = None;
         try {
             issue = jobj(self.issue_id);

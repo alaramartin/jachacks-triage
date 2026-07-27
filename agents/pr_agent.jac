@@ -29,7 +29,11 @@ import from jaclang.byllm.lib { Model }
 # default model (jac.toml, qwen2.5:7b) reliably truncates mid-string on it.
 # A code-specialized local model of the same size class fixes this without
 # any paid API key.
-glob fix_llm: Model = Model(model_name="ollama/qwen2.5-coder:7b");
+# Overridable via TRIAGE_FIX_MODEL so a hosted deploy isn't stuck naming a
+# local Ollama model it can never reach. Unset => unchanged locally.
+glob fix_llm: Model = Model(
+    model_name=os.environ.get("TRIAGE_FIX_MODEL", "ollama/qwen2.5-coder:7b")
+);
 
 glob SENSITIVE_SUBSTRINGS: list[str] = [
          ".env",
