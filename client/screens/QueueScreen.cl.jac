@@ -7,10 +7,11 @@ urgency descending.
 """
 
 import from "@jac/runtime" { useNavigate }
-sv import from ...main { get_queue, generate_pr, set_weights }
+sv import from ...main {
+    get_queue, generate_pr, generate_pr_for_issue, set_weights
+}
 import from ..components.ClusterRow { ClusterRow }
 import from ..components.SingletonRow { SingletonRow }
-import from ..components.UnresolvedList { UnresolvedList }
 import from ..components.SettingsPanel { SettingsPanel }
 
 # Single demo repo, same convention used throughout (reindex_repo's full_name
@@ -38,7 +39,9 @@ def _cluster_to_dict(c: any) -> dict {
         "max_severity": c.max_severity,
         "urgency": c.urgency,
         "fix_confidence": c.fix_confidence,
-        "issues": [_issue_summary_to_dict(i) for i in c.issues]
+        "issues": [_issue_summary_to_dict(i) for i in c.issues],
+        "pr_number": c.pr_number,
+        "pr_url": c.pr_url
     };
 }
 
@@ -51,12 +54,31 @@ def _singleton_to_dict(s: any) -> dict {
         "blast_radius": s.blast_radius,
         "severity": s.severity,
         "urgency": s.urgency,
-        "resolution_method": s.resolution_method
+        "resolution_method": s.resolution_method,
+        "parked": False,
+        "pr_number": s.pr_number,
+        "pr_url": s.pr_url
     };
 }
 
+# Parked issues live at the bottom of the same standalone list rather than in a
+# panel of their own. They resolved onto no file, so there is no blast radius,
+# urgency or severity to show - SingletonRow renders "-" for each of those and
+# drops the PR button, since there's no code node to patch.
 def _unresolved_to_dict(u: any) -> dict {
-    return {"id": u.id, "external_id": u.external_id, "title": u.title};
+    return {
+        "id": u.id,
+        "external_id": u.external_id,
+        "title": u.title,
+        "target_path": "",
+        "blast_radius": 0,
+        "severity": 0,
+        "urgency": 0.0,
+        "resolution_method": "none",
+        "parked": True,
+        "pr_number": 0,
+        "pr_url": ""
+    };
 }
 
 def:pub QueueScreen -> JsxElement {
@@ -66,6 +88,10 @@ def:pub QueueScreen -> JsxElement {
         expanded_id: str | None = None,
         pr_result: dict | None = None,
         settings_open: bool = False,
+        # id -> True while its walker is in flight, so the button can show a
+        # spinner. Drafting a PR takes ten-plus seconds (real source read, a
+        # full-file by llm() rewrite, then the GitHub call).
+        generating: dict = {},
         w_blast: float = 6.0,
         w_sev: float = 3.0,
         w_diff: float = 1.0;
@@ -97,11 +123,40 @@ def:pub QueueScreen -> JsxElement {
         expanded_id = None if expanded_id == cluster_id else cluster_id;
     }
 
+    def mark_generating(target_id: str, on: bool) {
+        next_generating: dict = {};
+        for (k, v) in generating.items() {
+            next_generating[k] = v;
+        }
+        if on {
+            next_generating[target_id] = True;
+        } else {
+            next_generating[target_id] = False;
+        }
+        generating = next_generating;
+    }
+
+    # On success we refetch rather than patching state by hand: get_queue now
+    # reports pr_number/pr_url off the `fixes` edge, so the row moves itself
+    # into Drafted PRs and stays there across a reload.
     async def handle_generate_pr(cluster_id: str) {
+        mark_generating(cluster_id, True);
         result = root spawn generate_pr(cluster_id=cluster_id);
         if result.reports and len(result.reports) > 0 {
             pr_result = result.reports[0] as dict;
         }
+        await load_queue();
+        mark_generating(cluster_id, False);
+    }
+
+    async def handle_generate_issue_pr(issue_id: str) {
+        mark_generating(issue_id, True);
+        result = root spawn generate_pr_for_issue(issue_id=issue_id);
+        if result.reports and len(result.reports) > 0 {
+            pr_result = result.reports[0] as dict;
+        }
+        await load_queue();
+        mark_generating(issue_id, False);
     }
 
     def handle_open_detail(cluster_id: str) {
@@ -142,13 +197,30 @@ def:pub QueueScreen -> JsxElement {
     }
 
     repo_name = queue["repo"] as str;
-    # get_queue already returns clusters urgency-descending, so position IS rank.
+
+    # Anything with a PR on it drops out of the working queue and into Drafted
+    # PRs at the bottom - the maintainer is done with it.
+    def _is_drafted(row: dict) -> bool {
+        return (row["pr_url"] as str) != "";
+    }
+
+    all_clusters = queue["clusters"] as list[dict];
+    live_clusters = [c for c in all_clusters if not _is_drafted(c)];
+    # get_queue returns clusters urgency-descending, so position IS rank - but
+    # rank the LIVE ones, so #1 is always the top of the working queue.
     clusters = [
         {"rank": i + 1, "cluster": c}
-        for (i, c) in enumerate(queue["clusters"] as list[dict])
+        for (i, c) in enumerate(live_clusters)
     ];
-    singletons = queue["singletons"] as list[dict];
-    unresolved = queue["unresolved"] as list[dict];
+    # One "standalone issues" section: ranked singletons first, then the parked
+    # ones we wouldn't guess a file for.
+    all_standalone = (queue["singletons"] as list[dict]) + (
+        queue["unresolved"] as list[dict]
+    );
+    standalone = [i for i in all_standalone if not _is_drafted(i)];
+    drafted_clusters = [c for c in all_clusters if _is_drafted(c)];
+    drafted_issues = [i for i in all_standalone if _is_drafted(i)];
+    drafted_count = len(drafted_clusters) + len(drafted_issues);
 
     return
         <div className="min-h-screen px-6 sm:px-12 py-10 max-w-6xl mx-auto">
@@ -234,10 +306,11 @@ def:pub QueueScreen -> JsxElement {
                         onToggle={lambda { toggle_cluster(cluster["id"] as str); }}
                         onGeneratePr={handle_generate_pr}
                         onOpenDetail={handle_open_detail}
+                        generating={generating[cluster["id"]] == True}
                     />
                 }}
             </div>
-            {if len(singletons) > 0 {
+            {if len(standalone) > 0 {
                 <h2
                     key="singles-h"
                     className="mt-10 mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-muted)]"
@@ -246,13 +319,50 @@ def:pub QueueScreen -> JsxElement {
                 </h2>
             }}
             <div className="flex flex-col gap-3">
-                {for issue in singletons {
-                    <SingletonRow key={issue["id"]} issue={issue} repo={repo_name}/>
+                {for issue in standalone {
+                    <SingletonRow
+                        key={issue["id"]}
+                        issue={issue}
+                        repo={repo_name}
+                        onGeneratePr={handle_generate_issue_pr}
+                        generating={generating[issue["id"]] == True}
+                    />
                 }}
             </div>
-            {if len(unresolved) > 0 {
-                <div key="unresolved" className="mt-10">
-                    <UnresolvedList issues={unresolved}/>
+            {if drafted_count > 0 {
+                <div key="drafted">
+                    <h2
+                        className="mt-10 mb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-green)]"
+                    >
+                        Drafted PRs ({str(drafted_count)})
+                    </h2>
+                    <p className="mb-3 text-xs text-[var(--color-text-muted)]">
+                        Waiting on you to review and merge on GitHub. Triage never merges anything itself.
+                    </p>
+                    <div className="flex flex-col gap-3">
+                        {for cluster in drafted_clusters {
+                            <ClusterRow
+                                key={cluster["id"]}
+                                cluster={cluster}
+                                rank={0}
+                                repo={repo_name}
+                                expanded={expanded_id == cluster["id"]}
+                                onToggle={lambda { toggle_cluster(cluster["id"] as str); }}
+                                onGeneratePr={handle_generate_pr}
+                                onOpenDetail={handle_open_detail}
+                                drafted={True}
+                            />
+                        }}
+                        {for issue in drafted_issues {
+                            <SingletonRow
+                                key={issue["id"]}
+                                issue={issue}
+                                repo={repo_name}
+                                onGeneratePr={handle_generate_issue_pr}
+                                drafted={True}
+                            />
+                        }}
+                    </div>
                 </div>
             }}
         </div>;

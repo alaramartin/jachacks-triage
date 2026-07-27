@@ -13,6 +13,7 @@ sv import from ..main { get_cluster_detail, generate_pr }
 import from .components.ResolutionBadge { ResolutionBadge }
 import from .components.StatPill { StatPill }
 import from .components.GraphView { GraphView }
+import from .components.Spinner { Spinner }
 
 def _issue_detail_to_dict(i: any) -> dict {
     return {
@@ -29,7 +30,8 @@ def:pub ClusterView -> JsxElement {
     has detail: dict | None = None,
         loading: bool = True,
         load_error: str | None = None,
-        pr_result: dict | None = None;
+        pr_result: dict | None = None,
+        pr_pending: bool = False;
 
     nav = useNavigate();
     params = useParams();
@@ -76,10 +78,12 @@ def:pub ClusterView -> JsxElement {
         if detail is None {
             return;
         }
+        pr_pending = True;
         result = root spawn generate_pr(cluster_id=detail["id"] as str);
         if result.reports and len(result.reports) > 0 {
             pr_result = result.reports[0] as dict;
         }
+        pr_pending = False;
     }
 
     def dismiss_banner(_e: MouseEvent) {
@@ -138,9 +142,13 @@ def:pub ClusterView -> JsxElement {
                 <div className="flex shrink-0 flex-col items-end gap-2">
                     <button
                         onClick={handle_generate_pr}
-                        className="rounded-lg bg-[var(--color-green)] px-5 py-2.5 text-[13px] font-semibold uppercase tracking-wide text-[#07130d] transition-colors hover:bg-[#54e79c]"
+                        disabled={pr_pending}
+                        className="flex items-center gap-2 rounded-lg bg-[var(--color-green)] px-5 py-2.5 text-[13px] font-semibold uppercase tracking-wide text-[#07130d] transition-colors hover:bg-[#54e79c] disabled:cursor-wait disabled:hover:bg-[var(--color-green)]"
                     >
-                        Generate PR
+                        {if pr_pending {
+                            <Spinner key="sp"/>
+                        }}
+                        {"Generating" if pr_pending else "Generate PR"}
                     </button>
                     {if existing_pr is not None {
                         <a

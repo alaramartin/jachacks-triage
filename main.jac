@@ -25,7 +25,9 @@ import from agents.ranking {
     weighted_urgency,
     weighted_cluster_urgency
 }
-import from agents.pr_agent { build_pr_for_cluster }
+import from agents.pr_agent {
+    build_pr_for_cluster, build_pr_for_issue, preview_issue_fix, IssueFixPreview
+}
 
 # ============================== Person 1 — Graph & Agents ==============================
 walker:pub reindex_repo {
@@ -257,6 +259,102 @@ walker:pub generate_pr {
     }
 }
 
+# Same human-only trigger as generate_pr, for a standalone issue that never
+# clustered. The cluster stays the headline unit of action (CLAUDE.md #2) -
+# this just means a lone issue isn't a dead end in the UI.
+walker:pub generate_pr_for_issue {
+    has issue_id: str;
+
+    can generate with Root entry {
+        issue: any = None;
+        try {
+            issue = jobj(self.issue_id);
+        } except Exception {
+            issue = None;
+        }
+        if not isinstance(issue, Issue) {
+            report {"ok": False, "error": "issue not found"};
+            disengage;
+        }
+
+        repos: list[Repo] = [root-->][?:Repo];
+        if len(repos) == 0 {
+            report {"ok": False, "error": "no repo indexed"};
+            disengage;
+        }
+        repo: Repo = repos[0];
+
+        targets: list[File] = [issue->:resolves_to:->][?:File];
+        target_path: str = targets[0].path if len(targets) > 0 else "";
+
+        result = build_pr_for_issue(issue, repo);
+        if not result.ok {
+            report {"ok": False, "error": result.error};
+            disengage;
+        }
+
+        title: str = f"fix({target_path}): {issue.title}"
+            if target_path
+            else f"fix: {issue.title}";
+
+        pr: PullRequest = PullRequest(
+            number=result.pr_number,
+            url=result.pr_url,
+            status="open",
+            title=title,
+            body=issue.title,
+        );
+        repo +>:owns:+> pr;
+        # CLAUDE.md #4.2 documents `fixes` as PullRequest -> Cluster; a
+        # standalone issue has no Cluster, so the same edge lands on the Issue.
+        # Nothing reads it in the other direction, so this is additive.
+        pr +>:fixes:+> issue;
+
+        report {
+            "ok": True,
+            "pr_number": result.pr_number,
+            "pr_url": result.pr_url,
+            "title": title,
+            "files_changed": [target_path]
+        };
+    }
+}
+
+# Powers the hover card on the queue's standalone rows: two sentences, "the
+# issue" and "the fix". Same by llm() call generate_pr_for_issue uses to derive
+# a root cause, so what you read on hover is what the PR gets built from.
+walker:pub get_issue_fix_preview {
+    has issue_id: str;
+
+    can preview with Root entry {
+        issue: any = None;
+        try {
+            issue = jobj(self.issue_id);
+        } except Exception {
+            issue = None;
+        }
+        if not isinstance(issue, Issue) {
+            report {"ok": False, "error": "issue not found"};
+            disengage;
+        }
+
+        targets: list[File] = [issue->:resolves_to:->][?:File];
+        if len(targets) == 0 {
+            report {"ok": False, "error": "issue isn't resolved onto a file"};
+            disengage;
+        }
+
+        preview: IssueFixPreview = preview_issue_fix(
+            targets[0].path, issue.title, issue.body
+        );
+        report {
+            "ok": True,
+            "issue_summary": preview.issue_summary,
+            "fix_summary": preview.fix_summary
+        };
+    }
+}
+
 # ======================= Person 1 — Queue + Cluster Detail (Phase B/C) =======================
 obj IssueSummary {
     has id: str;
@@ -276,6 +374,11 @@ obj ClusterView {
     has urgency: float;
     has fix_confidence: float;
     has issues: list[IssueSummary];
+    # A PR already drafted for this cluster (via the `fixes` edge). Empty url
+    # means none - the UI files those with a PR into its "Drafted PRs" section,
+    # so the state survives a page reload instead of living only in React.
+    has pr_number: int = 0;
+    has pr_url: str = "";
 }
 
 obj SingletonView {
@@ -287,6 +390,8 @@ obj SingletonView {
     has severity: int;
     has urgency: float;
     has resolution_method: str;
+    has pr_number: int = 0;
+    has pr_url: str = "";
 }
 
 obj UnresolvedView {
@@ -372,6 +477,7 @@ walker:pub get_queue {
             )
                 if len(members) > 0
                 else c.urgency;
+            cluster_prs: list[PullRequest] = [c<-:fixes:<-][?:PullRequest];
             cluster_views.append(
                 ClusterView(
                     id=jid(c),
@@ -382,7 +488,9 @@ walker:pub get_queue {
                     max_severity=max_sev,
                     urgency=cluster_urgency,
                     fix_confidence=c.fix_confidence,
-                    issues=issue_views
+                    issues=issue_views,
+                    pr_number=cluster_prs[0].number if len(cluster_prs) > 0 else 0,
+                    pr_url=cluster_prs[0].url if len(cluster_prs) > 0 else ""
                 )
             );
         }
@@ -408,6 +516,7 @@ walker:pub get_queue {
                     max_comment_velocity,
                     settings
                 );
+                issue_prs: list[PullRequest] = [i<-:fixes:<-][?:PullRequest];
                 singleton_views.append(
                     SingletonView(
                         id=jid(i),
@@ -417,7 +526,9 @@ walker:pub get_queue {
                         blast_radius=resolved[0].blast_radius,
                         severity=i.severity,
                         urgency=singleton_urgency,
-                        resolution_method=i.resolution_method
+                        resolution_method=i.resolution_method,
+                        pr_number=issue_prs[0].number if len(issue_prs) > 0 else 0,
+                        pr_url=issue_prs[0].url if len(issue_prs) > 0 else ""
                     )
                 );
             } else {

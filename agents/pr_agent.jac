@@ -12,7 +12,9 @@ call or GitHub write happens."""
 
 import os;
 import re;
-import from graph.nodes { Cluster, File, Issue, Repo, cluster_targets, grouped_in }
+import from graph.nodes {
+    Cluster, File, Issue, Repo, cluster_targets, grouped_in, resolves_to
+}
 import from integrations.github { create_pull_request, PullRequestResult }
 import from jaclang.byllm.lib { Model }
 
@@ -84,6 +86,29 @@ def _issue_summary(issue: Issue) -> str {
     return f"{issue.external_id}: {issue.title} - {issue.body}";
 }
 
+"""A standalone (unclustered) issue has no Cluster node, so it has no
+root_cause_summary / proposed_fix_summary to hand the fix generator - those are
+written by Agent 3 and only exist once two issues converge on one file. This
+derives the same two sentences for a single issue, and doubles as the hover
+text on the queue's standalone rows (one call serves both)."""
+obj IssueFixPreview {
+    has issue_summary: str;
+    has fix_summary: str;
+}
+
+sem IssueFixPreview = "A two-sentence read on a single bug report: what is actually broken, and the mechanical fix.";
+sem IssueFixPreview.issue_summary = "ONE sentence, plain language, describing what is actually going wrong in the code - not a restatement of the report's title.";
+sem IssueFixPreview.fix_summary = "ONE sentence describing the concrete, minimal code change that would fix it.";
+
+def preview_issue_fix(
+    target_path: str, title: str, body: str
+) -> IssueFixPreview by llm(temperature=0.0);
+
+sem preview_issue_fix = "Read one bug report and the file it was resolved onto, and state what is broken and how to fix it. Be concrete and specific to this code; exactly one sentence each, no preamble, no bullet points.";
+sem preview_issue_fix.target_path = "Repo-relative path of the file the issue resolves onto, e.g. 'core/db.py'.";
+sem preview_issue_fix.title = "The bug report's title.";
+sem preview_issue_fix.body = "The bug report's full text.";
+
 """Python-only repo (CLAUDE.md #2) - so a real syntax check via `compile()`
 is a cheap, exact gate. Returns "" if `content` is valid Python, else the
 compiler's error message. LLM-generated full-file rewrites occasionally
@@ -120,25 +145,40 @@ def _repair_module_docstring(content: str) -> str {
 ('reached by N of M files') that's the whole pitch, and links to every
 member issue - this text is on screen during the demo."""
 def build_pr_body(
-    cluster: Cluster, target: File, repo: Repo, members: list[Issue]
+    root_cause: str,
+    proposed_fix: str,
+    blast_radius: int,
+    target: File,
+    repo: Repo,
+    members: list[Issue]
 ) -> str {
     issue_lines: str = "\n".join([f"- {i.external_id}: {i.title}" for i in members]);
     return (
-        f"## Root cause\n{cluster.root_cause_summary}\n\n"
-        f"## Fix\n{cluster.proposed_fix_summary}\n\n"
-        f"## Why this is #1\n`{target.path}` is reached by **{cluster.blast_radius} of "
-        f"{repo.file_count} files** in this repo (transitive structural blast radius) - "
-        f"more than any other open cluster, computed by walking the import graph, not by "
-        f"reading the issues.\n\n"
+        f"## Root cause\n{root_cause}\n\n"
+        f"## Fix\n{proposed_fix}\n\n"
+        f"## Blast radius\n`{target.path}` is reached by **{blast_radius} of "
+        f"{repo.file_count} files** in this repo (transitive structural blast radius), "
+        f"computed by walking the import graph, not by reading the issues.\n\n"
         f"## Linked issues ({len(members)})\n{issue_lines}\n\n"
         f"---\n_Opened by Triage. A human clicked Generate PR - nothing here merges itself._"
     );
 }
 
-"""The only entry point `generate_pr` (main.jac) should call. Everything
-GitHub-specific lives in integrations/github.jac; this function owns the
-domain logic (denylist gate, source read, LLM fix, PR body)."""
-def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
+"""Shared core behind both entry points below - a PR is always "one target
+file, N linked issues, one diagnosed root cause". A cluster supplies N issues
+and Agent 3's summaries; a standalone issue supplies one issue and summaries
+derived by preview_issue_fix(). Everything GitHub-specific lives in
+integrations/github.jac; this owns the domain logic (denylist gate, source
+read, LLM fix, PR body)."""
+def _build_pr(
+    target: File,
+    members: list[Issue],
+    root_cause: str,
+    proposed_fix: str,
+    blast_radius: int,
+    headline: str,
+    repo: Repo
+) -> PullRequestResult {
     # Where the repo was actually indexed from (reindex_repo -> Repo.repo_path),
     # not a hardcoded demo path.
     repo_root: str = repo.repo_path;
@@ -147,11 +187,6 @@ def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
             ok=False, error="repo has no repo_path - call reindex_repo first"
         );
     }
-    targets: list[File] = [cluster->:cluster_targets:->][?:File];
-    if len(targets) == 0 {
-        return PullRequestResult(ok=False, error="cluster has no target file");
-    }
-    target: File = targets[0];
 
     if is_sensitive_path(target.path) {
         return PullRequestResult(
@@ -159,9 +194,8 @@ def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
         );
     }
 
-    members: list[Issue] = [cluster<-:grouped_in:<-][?:Issue];
     if len(members) == 0 {
-        return PullRequestResult(ok=False, error="cluster has no linked issues");
+        return PullRequestResult(ok=False, error="no linked issues");
     }
 
     source: str = _read_source(target.path, repo_root);
@@ -179,12 +213,7 @@ def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
     attempt: int = 0;
     while attempt < max_attempts {
         fix = generate_fix(
-            target.path,
-            source,
-            cluster.root_cause_summary,
-            cluster.proposed_fix_summary,
-            summaries,
-            retry_hint
+            target.path, source, root_cause, proposed_fix, summaries, retry_hint
         );
         syntax_error = _python_syntax_error(fix.new_content, target.path);
         if syntax_error {
@@ -209,12 +238,56 @@ def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
         print(f"WARNING: opening PR with unvalidated Python for {target.path}: {syntax_error}");
     }
 
-    title: str = f"fix({target.path}): {cluster.title}"
-        if cluster.title
+    title: str = f"fix({target.path}): {headline}"
+        if headline
         else f"fix: {target.path}";
-    body: str = build_pr_body(cluster, target, repo, members);
+    body: str = build_pr_body(
+        root_cause, proposed_fix, blast_radius, target, repo, members
+    );
 
     return create_pull_request(
         repo.full_name, title, body, repo.default_branch, target.path, fix.new_content
+    );
+}
+
+"""Entry point `generate_pr` (main.jac) calls - the cluster is the unit of
+action (CLAUDE.md #2), so this stays the primary path."""
+def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
+    targets: list[File] = [cluster->:cluster_targets:->][?:File];
+    if len(targets) == 0 {
+        return PullRequestResult(ok=False, error="cluster has no target file");
+    }
+    return _build_pr(
+        targets[0],
+        [cluster<-:grouped_in:<-][?:Issue],
+        cluster.root_cause_summary,
+        cluster.proposed_fix_summary,
+        cluster.blast_radius,
+        cluster.title,
+        repo
+    );
+}
+
+"""Entry point `generate_pr_for_issue` (main.jac) calls, for a standalone
+issue that never clustered. Same pipeline, same human trigger - the only
+difference is that the root cause and fix are derived for this one report
+instead of read off a Cluster node."""
+def build_pr_for_issue(issue: Issue, repo: Repo) -> PullRequestResult {
+    targets: list[File] = [issue->:resolves_to:->][?:File];
+    if len(targets) == 0 {
+        return PullRequestResult(
+            ok=False, error="issue isn't resolved onto a file - nothing to patch"
+        );
+    }
+    target: File = targets[0];
+    preview: IssueFixPreview = preview_issue_fix(target.path, issue.title, issue.body);
+    return _build_pr(
+        target,
+        [issue],
+        preview.issue_summary,
+        preview.fix_summary,
+        target.blast_radius,
+        issue.title,
+        repo
     );
 }

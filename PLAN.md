@@ -1403,6 +1403,64 @@ Green = the thing you click to act. Orange = the thing the graph is shouting abo
       **Not** click-tested: the ranking sliders and the Generate PR button (the walkers behind
       both are covered by `main.test.jac`, but the click paths deserve one manual pass).
 
+## Follow-up pass — standalone issues are first-class
+
+- [x] **Parked issues moved into the standalone list.** No more separate "couldn't confidently
+      place" panel; they render as ordinary rows at the bottom of **Standalone issues** with
+      `-` in place of blast radius / urgency / severity, an `unresolved` badge, and the reason
+      inline ("below confidence threshold - not placed"). The credibility beat survives, it
+      just isn't a box of its own any more.
+- [x] **Generate PR on standalone rows.** New `generate_pr_for_issue` walker (main.jac) +
+      `build_pr_for_issue` (agents/pr_agent.jac). `build_pr_for_cluster` was refactored onto a
+      shared `_build_pr(target, members, root_cause, proposed_fix, blast_radius, headline,
+      repo)` core, so both paths run the exact same pipeline: denylist gate, real source read,
+      `by llm()` full-file fix, syntax check + retry, real PR. Still human-triggered only.
+      Parked rows get no button — there's no code node to patch.
+- [x] **Hover card on those buttons.** New `get_issue_fix_preview` walker backed by
+      `preview_issue_fix()` `by llm()`, returning exactly two sentences: **the issue** and
+      **the fix**. Fetched on hover/focus, once per row, cached in the row's local state.
+      It is the *same* call `generate_pr_for_issue` derives its root cause from, so the hover
+      text is what the PR actually gets built from — not decorative copy.
+- [x] Verified in a real browser over CDP: hovered the button, the live `by llm()` text landed
+      in the card. Standalone rows carry no graph and no View detail, per the ask.
+- ⚠️ **Not exercised end to end:** clicking Generate PR on a standalone issue opens a *real*
+      PR against the demo repo, so it was left unclicked. The GitHub half of that path is the
+      same code the cluster button already proved (PR #5), but give it one manual click before
+      the demo.
+
+Schema note for P1/P2: `fixes` (documented in CLAUDE.md §4.2 as PullRequest -> Cluster) now
+also lands on an Issue when the PR came from a standalone issue. Nothing reads it in the
+other direction, so it is purely additive.
+
+## Follow-up pass — Generate PR feedback + Drafted PRs
+
+Clicking Generate PR used to do nothing visible for ten-plus seconds (real source read,
+full-file `by llm()` rewrite, syntax check, GitHub call). Now:
+
+- [x] **Button shows progress.** On click it becomes a spinner + "Generating", is disabled,
+      and takes a `cursor-wait`. Same treatment on cluster rows, standalone rows and the
+      cluster detail page (`components/Spinner.cl.jac`).
+- [x] **Done items leave the queue.** On success the screen refetches `get_queue`; the row
+      dims to 55% opacity and moves to a new **Drafted PRs** section at the bottom, with its
+      action replaced by a `PR #n →` link. Cluster rows there swap the orange `#1` rank badge
+      for a green `drafted` badge; ranks renumber over the *live* clusters, so #1 is always
+      the top of the working queue.
+- [x] **It survives a reload.** `get_queue` now reports `pr_number` / `pr_url` on both
+      `ClusterView` and `SingletonView`, read off the `fixes` edge - so "drafted" is graph
+      state, not React state. A refresh does not resurrect a row you already actioned.
+- [x] Verified in a real browser over CDP. The spinner was checked by **holding** the
+      `/walker/generate_pr` request at the CDP Fetch layer and aborting it, so the mid-flight
+      state was observed (`text: "Generating"`, `disabled: true`, `animationName: "spin"`)
+      **without opening a real PR**. The drafted section renders from genuinely pre-existing
+      PRs (#5 on the core/validation.py cluster, #7 on SEED-17).
+
+### ⚠️ Demo-day trap
+
+Every PR you open in rehearsal moves that item into Drafted PRs **permanently** (it's on the
+graph). The `core/validation.py` cluster - the 14-of-18 blast-radius hero of beat 2 - already
+sits down there because of earlier testing. **Run `reset_demo` + re-seed before the real
+run**, or your top cluster will be greyed out at the bottom of the page when you present.
+
 ## Data honesty (check at the end — CLAUDE.md §2)
 
 - ✅ **Real:** repo name + file count, clusters, member issues, blast radius, urgency,

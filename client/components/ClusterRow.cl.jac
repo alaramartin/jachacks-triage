@@ -8,6 +8,7 @@ issues with severity + how each was resolved.
 
 import from .ResolutionBadge { ResolutionBadge }
 import from .IssueChip { IssueChip }
+import from .Spinner { Spinner }
 
 def:pub ClusterRow(
     cluster: dict,
@@ -16,7 +17,9 @@ def:pub ClusterRow(
     expanded: bool,
     onToggle: Callable[[], None],
     onGeneratePr: Callable[[str], None],
-    onOpenDetail: Callable[[str], None]
+    onOpenDetail: Callable[[str], None],
+    generating: bool = False,
+    drafted: bool = False
 ) -> JsxElement {
     blast_radius = cluster["blast_radius"];
     urgency = cluster["urgency"] as float;
@@ -46,12 +49,16 @@ def:pub ClusterRow(
         onOpenDetail(cluster["id"] as str);
     }
 
-    border_cls = "border-[var(--color-orange)]/45" if top else "border-[var(--color-border)]";
+    border_cls = "border-[var(--color-border)]"
+        if drafted
+        else ("border-[var(--color-orange)]/45" if top else "border-[var(--color-border)]");
+    # Drafted rows are done with - dimmed, and they no longer carry a rank.
+    shell_cls = "rounded-2xl border bg-[var(--color-surface)] overflow-hidden transition-colors "
+        + border_cls
+        + (" opacity-55" if drafted else "");
 
     return
-        <div
-            className={"rounded-2xl border bg-[var(--color-surface)] overflow-hidden transition-colors " + border_cls}
-        >
+        <div className={shell_cls}>
             <div
                 onClick={handle_toggle}
                 onKeyDown={handle_toggle_key}
@@ -81,9 +88,12 @@ def:pub ClusterRow(
                 <div className="flex-1 min-w-0 px-5 py-5 lg:pl-2">
                     <div className="flex items-center gap-2 flex-wrap">
                         <span
-                            className="rounded-full bg-[var(--color-orange-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--color-orange)]"
+                            className={"rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] "
+                                + ("bg-[var(--color-green-soft)] text-[var(--color-green)]"
+                                    if drafted
+                                    else "bg-[var(--color-orange-soft)] text-[var(--color-orange)]")}
                         >
-                            {"#" + str(rank)} · cluster of {str(cluster["issue_count"])}
+                            {("drafted" if drafted else "#" + str(rank))} · cluster of {str(cluster["issue_count"])}
                         </span>
                         <span className="font-mono text-xs text-[var(--color-text-muted)] truncate">
                             {cluster["target_path"]}
@@ -113,12 +123,31 @@ def:pub ClusterRow(
                 <div
                     className="flex flex-row lg:flex-col justify-center gap-2.5 p-5 shrink-0 border-t lg:border-t-0 lg:border-l border-[var(--color-border)]"
                 >
-                    <button
-                        onClick={handle_generate}
-                        className="rounded-lg bg-[var(--color-green)] px-4 py-2.5 text-[13px] font-semibold uppercase tracking-wide text-[#07130d] transition-colors hover:bg-[#54e79c]"
-                    >
-                        Generate PR
-                    </button>
+                    {if drafted {
+                        <a
+                            key="pr-link"
+                            href={cluster["pr_url"]}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={lambda (e: MouseEvent) -> None { e.stopPropagation(); }}
+                            className="rounded-lg border border-[var(--color-green)]/40 px-4 py-2.5 text-center text-[13px] font-medium text-[var(--color-green)] transition-colors hover:bg-[var(--color-green-soft)]"
+                        >
+                            PR #{str(cluster["pr_number"])} →
+                        </a>
+                    }}
+                    {if not drafted {
+                        <button
+                            key="gen"
+                            onClick={handle_generate}
+                            disabled={generating}
+                            className="flex items-center justify-center gap-2 rounded-lg bg-[var(--color-green)] px-4 py-2.5 text-[13px] font-semibold uppercase tracking-wide text-[#07130d] transition-colors hover:bg-[#54e79c] disabled:cursor-wait disabled:hover:bg-[var(--color-green)]"
+                        >
+                            {if generating {
+                                <Spinner key="sp"/>
+                            }}
+                            {"Generating" if generating else "Generate PR"}
+                        </button>
+                    }}
                     <button
                         onClick={handle_open_detail}
                         className="rounded-lg border border-[var(--color-orange)]/60 px-4 py-2.5 text-[13px] font-medium text-[var(--color-orange)] transition-colors hover:bg-[var(--color-orange-soft)]"
