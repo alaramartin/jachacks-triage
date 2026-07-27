@@ -26,7 +26,9 @@ import from urllib.request { Request, urlopen }
 # Override without editing this file:  TRIAGE_API=http://localhost:8001 jac run seed/seed.jac
 glob BASE_URL: str = os.environ.get("TRIAGE_API", "http://localhost:8000");
 # Override to seed against a different repo's issue queue without editing
-# this file. Defaults to whatever full_name reindex_repo already indexed.
+# this file. Empty means "the most recently selected repo" (get_active_repo) -
+# so if you have been exploring another repo through the UI, set this
+# explicitly to alaramartin/triage-demo before re-seeding the demo.
 glob GITHUB_REPO: str = os.environ.get("TRIAGE_GITHUB_REPO", "");
 
 def _post(path: str, payload: dict) -> dict {

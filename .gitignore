@@ -17,6 +17,9 @@ node_modules/
 # OS
 .DS_Store
 
+# Cloned repos Triage indexes (select_repo). Disposable - re-cloned on demand.
+.workspace/
+
 # Jac build artifacts
 .jac/
 .pytest_cache/

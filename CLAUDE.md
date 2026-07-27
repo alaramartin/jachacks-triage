@@ -266,10 +266,48 @@ this file first and gets announced in the group chat.
 Jac turns a `walker:pub` into a REST endpoint automatically; request bodies map onto walker
 fields and `report` becomes the JSON response.
 
+### GitHub auth — `github_status` / `github_login` / `github_logout`
+
+**OAuth is real now — it is no longer a scope cut.** Register an OAuth app
+(`https://github.com/settings/developers`, callback `http://localhost:8000`), put
+`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` in `.env`, and the login button lights up.
+
+- `github_status` `{ "redirect_uri": "" }` → `{ "authenticated": true, "source": "oauth" | "token",
+  "login": "...", "avatar_url": "...", "oauth_configured": true, "authorize_url": "https://github.com/login/oauth/authorize?..." }`.
+  One round trip: the login screen either redirects to `/repos` or renders `authorize_url` as a link.
+- `github_login` `{ "code": "..." }` → exchanges the code server-side (the client secret never
+  reaches the browser), stores the token on the single root-attached `GithubAuth` node, reports
+  `{ ok, login, name, avatar_url }`. **No endpoint ever reports the token itself.**
+- `github_logout` `{}` → deletes that node.
+
+**`source: "token"` is the fallback:** with no OAuth session but a `GITHUB_TOKEN` in `.env`,
+everything still works and reports that token's user. That's what keeps the demo runnable on a
+machine where nobody registered an OAuth app.
+
+### `list_my_repos` / `select_repo` / `get_active_repo`
+
+- `list_my_repos` `{}` → `{ ok, repos: [{ full_name, description, language, stars, open_issues,
+  private, can_push, default_branch, indexed }] }` — every repo the account owns or collaborates
+  on, live from the GitHub API. Powers "Your projects". Nothing here is fabricated: no token means
+  `{ ok: false, error: "not logged in", repos: [] }`.
+- `select_repo` `{ "repo_url": "pallets/flask" }` — accepts `owner/name`, a browser URL (with
+  `/issues`, `/tree/main`, `.git`, trailing slash), or an SSH remote. Shallow-clones into
+  `.workspace/` and builds the code substrate. **Does not ingest issues** — that's a separate call
+  because it costs three LLM calls per issue. Report: `{ ok, full_name, default_branch, description,
+  files_indexed, import_edges, open_issues, issues_in_graph }`.
+- `get_active_repo` `{}` → `{ ok, full_name, file_count, issues_in_graph }`, the most recently
+  selected repo. `/queue` uses `?repo=owner/name` from the URL and falls back to this.
+
+**More than one repo can be indexed at once now.** `get_queue`/`set_weights` already keyed off
+`full_name`; `ingest_issue`, `ingest_from_github`, `generate_pr` and `generate_pr_for_issue` no
+longer assume `[root-->][?:Repo][0]` — they resolve the repo by name, by the `owns` edge, or by
+"most recently selected". Don't reintroduce that assumption.
+
 ### `reindex_repo`
 
 Request: `{ "repo_path": "seed/repo", "full_name": "triage-demo/shipyard" }`
-Builds the code substrate. Report:
+Builds the code substrate from a **local** path (the seed repo path). `select_repo` is the
+GitHub-facing equivalent. Report:
 
 ```json
 { "ok": true, "files_indexed": 18, "import_edges": 24 }
@@ -296,8 +334,13 @@ If parked: `{ "issue_id": "...", "resolved_to": null, "resolution_method": "none
 
 ### `ingest_from_github`
 
-Request: `{ "full_name": "alaramartin/triage-demo" }` — `full_name` defaults to the indexed
-repo's own `full_name` if omitted. Fetches that repo's **open issues live from the GitHub REST
+Request: `{ "full_name": "alaramartin/triage-demo", "limit": 0 }` — `full_name` defaults to the
+**most recently selected** repo if omitted (`get_active_repo`); `limit` caps how many issues are
+ingested (`0` = all, which is what the repo picker uses — triaging the *whole* queue is the
+point). It's a real API-level control for scripted runs, not a UI default: each issue costs three
+local LLM calls (~9s), so a 500-issue repo is over an hour. When a limit IS passed, GitHub is
+asked for the most recently *updated* issues, so a capped run still shows the live queue.
+Fetches that repo's **open issues live from the GitHub REST
 API** (`integrations/github.jac`'s `fetch_open_issues`) and runs each one through the exact
 same Agent 1 → 2 → 3 → 4 cascade as `ingest_issue` (they share `main.jac`'s `_ingest_one`
 helper). `external_id` on the resulting `Issue` nodes is the real GitHub issue number as a

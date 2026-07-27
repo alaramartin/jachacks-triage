@@ -13,7 +13,13 @@ call or GitHub write happens."""
 import os;
 import re;
 import from graph.nodes {
-    Cluster, File, Issue, Repo, cluster_targets, grouped_in, resolves_to
+    Cluster,
+    File,
+    Issue,
+    Repo,
+    cluster_targets,
+    grouped_in,
+    resolves_to
 }
 import from integrations.github { create_pull_request, PullRequestResult }
 import from jaclang.byllm.lib { Model }
@@ -100,9 +106,9 @@ sem IssueFixPreview = "A two-sentence read on a single bug report: what is actua
 sem IssueFixPreview.issue_summary = "ONE sentence, plain language, describing what is actually going wrong in the code - not a restatement of the report's title.";
 sem IssueFixPreview.fix_summary = "ONE sentence describing the concrete, minimal code change that would fix it.";
 
-def preview_issue_fix(
-    target_path: str, title: str, body: str
-) -> IssueFixPreview by llm(temperature=0.0);
+def preview_issue_fix(target_path: str, title: str, body: str) -> IssueFixPreview by llm(
+    temperature=0.0
+);
 
 sem preview_issue_fix = "Read one bug report and the file it was resolved onto, and state what is broken and how to fix it. Be concrete and specific to this code; exactly one sentence each, no preamble, no bullet points.";
 sem preview_issue_fix.target_path = "Repo-relative path of the file the issue resolves onto, e.g. 'core/db.py'.";
@@ -177,7 +183,8 @@ def _build_pr(
     proposed_fix: str,
     blast_radius: int,
     headline: str,
-    repo: Repo
+    repo: Repo,
+    token: str
 ) -> PullRequestResult {
     # Where the repo was actually indexed from (reindex_repo -> Repo.repo_path),
     # not a hardcoded demo path.
@@ -235,7 +242,9 @@ def _build_pr(
     # invalid Python, open the PR anyway with the best attempt rather than
     # blocking the whole feature on local-model code-gen quality.
     if syntax_error {
-        print(f"WARNING: opening PR with unvalidated Python for {target.path}: {syntax_error}");
+        print(
+            f"WARNING: opening PR with unvalidated Python for {target.path}: {syntax_error}"
+        );
     }
 
     title: str = f"fix({target.path}): {headline}"
@@ -246,13 +255,21 @@ def _build_pr(
     );
 
     return create_pull_request(
-        repo.full_name, title, body, repo.default_branch, target.path, fix.new_content
+        repo.full_name,
+        title,
+        body,
+        repo.default_branch,
+        target.path,
+        fix.new_content,
+        token
     );
 }
 
 """Entry point `generate_pr` (main.jac) calls - the cluster is the unit of
 action (CLAUDE.md #2), so this stays the primary path."""
-def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
+def build_pr_for_cluster(
+    cluster: Cluster, repo: Repo, token: str = ""
+) -> PullRequestResult {
     targets: list[File] = [cluster->:cluster_targets:->][?:File];
     if len(targets) == 0 {
         return PullRequestResult(ok=False, error="cluster has no target file");
@@ -264,7 +281,8 @@ def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
         cluster.proposed_fix_summary,
         cluster.blast_radius,
         cluster.title,
-        repo
+        repo,
+        token
     );
 }
 
@@ -272,7 +290,7 @@ def build_pr_for_cluster(cluster: Cluster, repo: Repo) -> PullRequestResult {
 issue that never clustered. Same pipeline, same human trigger - the only
 difference is that the root cause and fix are derived for this one report
 instead of read off a Cluster node."""
-def build_pr_for_issue(issue: Issue, repo: Repo) -> PullRequestResult {
+def build_pr_for_issue(issue: Issue, repo: Repo, token: str = "") -> PullRequestResult {
     targets: list[File] = [issue->:resolves_to:->][?:File];
     if len(targets) == 0 {
         return PullRequestResult(
@@ -288,6 +306,7 @@ def build_pr_for_issue(issue: Issue, repo: Repo) -> PullRequestResult {
         preview.fix_summary,
         target.blast_radius,
         issue.title,
-        repo
+        repo,
+        token
     );
 }

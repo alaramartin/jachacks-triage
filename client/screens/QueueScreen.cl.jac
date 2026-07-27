@@ -6,18 +6,31 @@ order here IS the order get_queue returns, clusters/singletons already ranked by
 urgency descending.
 """
 
-import from "@jac/runtime" { useNavigate }
+import from "@jac/runtime" { useNavigate, useLocation }
 sv import from ...main {
-    get_queue, generate_pr, generate_pr_for_issue, set_weights
+    get_queue,
+    generate_pr,
+    generate_pr_for_issue,
+    set_weights,
+    get_active_repo
 }
 import from ..components.ClusterRow { ClusterRow }
 import from ..components.SingletonRow { SingletonRow }
 import from ..components.SettingsPanel { SettingsPanel }
 
-# Single demo repo, same convention used throughout (reindex_repo's full_name
-# in CLAUDE.md 6 and every seed/seed.jac ingestion call) - there is no live
-# multi-repo GitHub listing (OAuth is a documented work in progress).
-glob DEMO_REPO: str = "alaramartin/triage-demo";
+# Which repo this dashboard is showing comes from the URL the repo picker
+# navigated to (/queue?repo=owner/name); a bare /queue (reload, direct visit)
+# falls back to walker/get_active_repo - the most recently selected one. No
+# repo name is hardcoded anywhere on this screen.
+def _repo_from_search(search: str) -> str {
+    raw = search[1:] if search.startswith("?") else search;
+    for part in raw.split("&") {
+        if part.startswith("repo=") {
+            return part[5:].replace("%2F", "/");
+        }
+    }
+    return "";
+}
 
 def _issue_summary_to_dict(i: any) -> dict {
     return {
@@ -88,6 +101,7 @@ def:pub QueueScreen -> JsxElement {
         expanded_id: str | None = None,
         pr_result: dict | None = None,
         settings_open: bool = False,
+        active_repo: str = "",
         # id -> True while its walker is in flight, so the button can show a
         # spinner. Drafting a PR takes ten-plus seconds (real source read, a
         # full-file by llm() rewrite, then the GitHub call).
@@ -97,9 +111,15 @@ def:pub QueueScreen -> JsxElement {
         w_diff: float = 1.0;
 
     nav = useNavigate();
+    location = useLocation();
 
-    async def load_queue {
-        result = root spawn get_queue(full_name=DEMO_REPO);
+    async def load_queue(full_name: str) {
+        if not full_name {
+            load_error = "No repository selected yet - pick one from Your projects.";
+            loading = False;
+            return;
+        }
+        result = root spawn get_queue(full_name=full_name);
         if result.reports and len(result.reports) > 0 {
             resp = result.reports[0];
             queue = {
@@ -116,7 +136,15 @@ def:pub QueueScreen -> JsxElement {
     }
 
     async can with entry {
-        await load_queue();
+        name = _repo_from_search(location.search);
+        if not name {
+            active = root spawn get_active_repo();
+            if active.reports and len(active.reports) > 0 {
+                name = active.reports[0]["full_name"];
+            }
+        }
+        active_repo = name;
+        await load_queue(name);
     }
 
     def toggle_cluster(cluster_id: str) {
@@ -145,7 +173,7 @@ def:pub QueueScreen -> JsxElement {
         if result.reports and len(result.reports) > 0 {
             pr_result = result.reports[0] as dict;
         }
-        await load_queue();
+        await load_queue(active_repo);
         mark_generating(cluster_id, False);
     }
 
@@ -155,7 +183,7 @@ def:pub QueueScreen -> JsxElement {
         if result.reports and len(result.reports) > 0 {
             pr_result = result.reports[0] as dict;
         }
-        await load_queue();
+        await load_queue(active_repo);
         mark_generating(issue_id, False);
     }
 
@@ -175,9 +203,9 @@ def:pub QueueScreen -> JsxElement {
         w_sev = next_sev;
         w_diff = next_diff;
         root spawn set_weights(
-            full_name=DEMO_REPO, w_blast=next_blast, w_sev=next_sev, w_diff=next_diff
+            full_name=active_repo, w_blast=next_blast, w_sev=next_sev, w_diff=next_diff
         );
-        await load_queue();
+        await load_queue(active_repo);
     }
 
     def dismiss_banner(_e: MouseEvent) {
@@ -185,15 +213,21 @@ def:pub QueueScreen -> JsxElement {
     }
 
     if loading {
-        return <div className="min-h-screen flex items-center justify-center text-sm text-[var(--color-text-muted)]">
-            Loading queue...
-        </div>;
+        return
+            <div
+                className="min-h-screen flex items-center justify-center text-sm text-[var(--color-text-muted)]"
+            >
+                Loading queue...
+            </div>;
     }
 
     if queue is None {
-        return <div className="min-h-screen flex items-center justify-center text-sm text-[var(--color-orange)]">
-            {load_error or "Couldn't load the queue."}
-        </div>;
+        return
+            <div
+                className="min-h-screen flex items-center justify-center text-sm text-[var(--color-orange)]"
+            >
+                {load_error or "Couldn't load the queue."}
+            </div>;
     }
 
     repo_name = queue["repo"] as str;
@@ -205,21 +239,34 @@ def:pub QueueScreen -> JsxElement {
     }
 
     all_clusters = queue["clusters"] as list[dict];
-    live_clusters = [c for c in all_clusters if not _is_drafted(c)];
+    live_clusters = [
+        c
+        for c in all_clusters
+        if not _is_drafted(c)
+    ];
     # get_queue returns clusters urgency-descending, so position IS rank - but
     # rank the LIVE ones, so #1 is always the top of the working queue.
-    clusters = [
-        {"rank": i + 1, "cluster": c}
-        for (i, c) in enumerate(live_clusters)
-    ];
+    clusters = [{"rank": i + 1, "cluster": c} for (i, c) in enumerate(live_clusters)];
     # One "standalone issues" section: ranked singletons first, then the parked
     # ones we wouldn't guess a file for.
     all_standalone = (queue["singletons"] as list[dict]) + (
         queue["unresolved"] as list[dict]
     );
-    standalone = [i for i in all_standalone if not _is_drafted(i)];
-    drafted_clusters = [c for c in all_clusters if _is_drafted(c)];
-    drafted_issues = [i for i in all_standalone if _is_drafted(i)];
+    standalone = [
+        i
+        for i in all_standalone
+        if not _is_drafted(i)
+    ];
+    drafted_clusters = [
+        c
+        for c in all_clusters
+        if _is_drafted(c)
+    ];
+    drafted_issues = [
+        i
+        for i in all_standalone
+        if _is_drafted(i)
+    ];
     drafted_count = len(drafted_clusters) + len(drafted_issues);
 
     return
@@ -238,7 +285,9 @@ def:pub QueueScreen -> JsxElement {
                         {repo_name}
                     </h1>
                     <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-                        {str(queue["file_count"])} files indexed · ranked by structural blast radius, not by how the issue is worded.
+                        {str(
+                            queue["file_count"]
+                        )} files indexed · ranked by structural blast radius, not by how the issue is worded.
                     </p>
                 </div>
                 <div className="shrink-0 pt-1">
@@ -347,7 +396,9 @@ def:pub QueueScreen -> JsxElement {
                                 rank={0}
                                 repo={repo_name}
                                 expanded={expanded_id == cluster["id"]}
-                                onToggle={lambda { toggle_cluster(cluster["id"] as str); }}
+                                onToggle={lambda { toggle_cluster(
+                                    cluster["id"] as str
+                                ); }}
                                 onGeneratePr={handle_generate_pr}
                                 onOpenDetail={handle_open_detail}
                                 drafted={True}

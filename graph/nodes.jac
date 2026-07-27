@@ -1,10 +1,29 @@
 """Single source of truth for the Triage graph schema. See CLAUDE.md #4.
 Owner: Person 1. Schema changes go through P1, announce in chat before editing."""
 
+# The logged-in GitHub session. Attaches directly to root (it spans repos, so
+# it is deliberately NOT owned by a Repo), and at most one exists at a time -
+# github_login upserts it, github_logout deletes it.
+node GithubAuth {
+    has login: str = "";
+    has name: str = "";
+    has avatar_url: str = "";
+    has access_token: str = "";  # never leaves the server - no walker reports it
+    has connected_at: float = 0.0;
+    # Set by github_logout. Without it, logging out is a no-op on any machine
+    # that has a .env GITHUB_TOKEN: github_status would just re-authenticate
+    # from that fallback and the login screen would bounce straight back to
+    # /repos. A signed-out node suppresses the fallback until the next login.
+    has signed_out: bool = False;
+}
+
 node Repo {
     has full_name: str;
     has default_branch: str = "main";
     has file_count: int = 0;
+    # Unix ts of the last select_repo on this Repo. get_active_repo picks the
+    # max, so a reload of /queue with no ?repo= lands on what you last opened.
+    has last_selected: float = 0.0;
     # On-disk path this repo was indexed from (reindex_repo's repo_path).
     # Read by triage/clustering/pr_agent to load real source off disk instead
     # of each hardcoding the "seed/repo" demo convention.

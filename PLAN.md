@@ -1348,6 +1348,85 @@ terms to taste, but the graph is doing the heavy lifting no matter where you set
 
 ---
 
+# GITHUB LOGIN — real OAuth + any-repo indexing (built after C4, post-freeze)
+
+**Status: built and verified live end-to-end.** This replaces the "GitHub OAuth is a documented
+scope cut" note that appears throughout the older sections below — those are now historical.
+The login button, the "Your projects" list, and "choose another repo" all run on real GitHub
+data. Nothing on those screens is hardcoded any more.
+
+**⚠️ ONE HUMAN STEP REMAINS.** The OAuth *code* is done; the OAuth *app* is not registered.
+Until it is, `github_status` reports `oauth_configured: false` and the login button renders
+disabled with an explanation. To turn it on:
+
+1. https://github.com/settings/developers → **New OAuth App**
+   - Application name: `Triage`
+   - Homepage URL: `http://localhost:8000`
+   - **Authorization callback URL: `http://localhost:8000`** (the app root — the login screen
+     reads `?code=` off it; do NOT use a `/callback` path, the SPA has no such route)
+2. Generate a client secret, put both values in `.env`:
+   `GITHUB_CLIENT_ID=...` / `GITHUB_CLIENT_SECRET=...`
+3. Restart `jac start main.jac`. The button becomes a real link to GitHub's consent screen.
+
+**Until that's done the app still works** — with `GITHUB_TOKEN` set, `github_status` reports
+`source: "token"` and the login screen skips straight to `/repos` with the token's real
+identity. So this is a strict upgrade, not a demo risk.
+
+**What was built**
+
+| Layer | Change |
+| --- | --- |
+| `graph/nodes.jac` | new `GithubAuth` node (root-attached, at most one) holding login/name/avatar/token; `Repo.last_selected` for "which repo is the dashboard showing" |
+| `integrations/github.jac` | `authorize_url`, `exchange_code_for_token(code, redirect_uri)`, `get_authenticated_user`, enriched `list_repos`, `get_repo`, `parse_repo_full_name`, `clone_repo` (shallow, into `.workspace/`), `fetch_open_issues(full_name, limit, token)`. **Every call now takes an explicit `token`** that falls back to `.env`'s `GITHUB_TOKEN` — no mutable global session state |
+| `integrations/ast_parser.jac` | hardened for arbitrary real repos: skips `.git`/`node_modules`/`venv`/`build`, tolerates unparseable + non-UTF8 files, resolves **relative imports**, and resolves **package-root-relative module names** so `src/`-layout repos actually get import edges |
+| `main.jac` | `github_status`, `github_login`, `github_logout`, `list_my_repos`, `select_repo`, `get_active_repo`; `ingest_issue`/`ingest_from_github`/`generate_pr`/`generate_pr_for_issue` no longer assume a single `[root-->][?:Repo][0]` repo |
+| `client/screens/LoginScreen` | real OAuth link + `?code=` handling; no more "advances to the repo picker authenticating nothing" |
+| `client/screens/RepoPickerScreen` | real repo grid from `list_my_repos` + a "choose another repo" URL box; two-stage progress (clone/index → triage). **No issue cap** — the whole queue gets triaged, with a time estimate shown up front |
+| `client/screens/QueueScreen` | `DEMO_REPO` constant **deleted** — repo comes from `/queue?repo=owner/name` or `get_active_repo` |
+
+**Verified live (not from notes):** `pallets/flask` via the paste-a-link path → 83 files, **174
+import edges**, `src/flask/app.py` blast radius **23**, 3 real GitHub issues ingested and ranked
+with their real issue numbers as `external_id`. Seed repo re-verified unchanged afterwards: 18
+files / 26 edges / `core/validation.py` = **14**, clusters 6.76 / 3.76 / 2.58, 4 unresolved.
+`jac test -d .` → **35 passed**, same as before.
+
+**Two counting gotchas, both real bugs that shipped and were fixed:** GitHub's
+`open_issues_count` **includes pull requests** (`jaseci-labs/Agentic-AI` reports 44 there but has
+37 issues + 7 PRs), so `select_repo` calls `count_open_issues` for a true count and the repo grid
+labels its cheap number "issues + PRs". And an early 15-issue ingest cap in the repo picker was
+removed — it silently would have triaged only 15 of the demo repo's 20 issues.
+
+**Demo note on repo choice:** pick a *Python-heavy* repo for the wow moment. `jaseci-labs/jac`
+indexes to only 95 Python files / 12 import edges (it's a Jac repo, so there's little Python to
+graph) and the blast radii come out flat. `pallets/flask` is the good one — dense import graph,
+only ~10 open issues so a full ingest finishes fast.
+
+**🚨 THE ONE GOTCHA THAT COST THE MOST TIME — read this before debugging anything weird**
+
+**After editing `graph/nodes.jac`, you MUST `rm -rf .jac/cache` before restarting the server.**
+The compile cache holds a stale `graph.nodes` module, and `jac check` does NOT catch it (it
+compiles fresh). The symptoms are wildly misleading and all trace back to this one cause:
+
+- `NameError: name 'Repo' is not defined` at `root ++> Repo(...)` — under `jac start` only,
+  never under `jac run`.
+- `NameError: name 'GithubAuth' is not defined` inside a plain `def`.
+- **`[root-->][?:SomeType]` silently stops narrowing** and hands back a node of a totally
+  different type, so you get `'Repo' object has no attribute 'login'` — the filter didn't
+  filter, it just returned everything.
+- Any of the above failing on the *first* call after a restart and then appearing to work.
+
+Two false leads chased along the way, recorded so nobody re-chases them: a leading
+`import time;` above the archetype imports (looked like the cause under bisection, wasn't —
+the bisect commands also wiped the DB), and `SqliteMemory: schema drift on graph.nodes.Repo`
+in the log. **The drift message is real but separate**: adding a field to a node type that
+already has persisted instances does require deleting `.jac/data/*.db` and re-ingesting
+(~3 min of local LLM for a full seed run). Cache first, then DB — in that order.
+
+`main.jac`'s `_auth_node` / `_all_repos` helpers re-check `isinstance` for exactly this reason:
+it turns the stale-cache failure from a crash into an empty result.
+
+---
+
 # WEBSITE UI — visual pass (dark / green + orange)
 
 Restyle of the existing four screens from Alara's Excalidraw sketches. Structure and data

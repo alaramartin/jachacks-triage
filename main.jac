@@ -3,6 +3,7 @@ SHARED FILE - highest merge-conflict risk. One endpoint per person per commit.
 Pull before you touch it. Never reformat the whole file. See CLAUDE.md #9."""
 
 import from graph.nodes {
+    GithubAuth,
     Repo,
     File,
     Issue,
@@ -31,7 +32,384 @@ import from agents.pr_agent {
     preview_issue_fix,
     IssueFixPreview
 }
-import from integrations.github { fetch_open_issues, RemoteIssue }
+import time;
+import from integrations.github {
+    fetch_open_issues,
+    RemoteIssue,
+    oauth_configured,
+    authorize_url,
+    exchange_code_for_token,
+    get_authenticated_user,
+    GithubUser,
+    list_repos,
+    get_repo,
+    parse_repo_full_name,
+    clone_repo,
+    count_open_issues,
+    RepoSummary,
+    CloneResult,
+    GITHUB_TOKEN,
+    APP_URL
+}
+
+# ============================== GitHub session helpers ==============================
+# The OAuth token lives on a single root-attached GithubAuth node and is read
+# back here, then passed explicitly into integrations/github.jac. Nothing
+# reports the token itself - it never crosses the wire to the browser.
+# The explicit isinstance re-check is belt-and-braces: with a STALE .jac/cache
+# for graph.nodes, `[root-->][?:Type]` silently stops narrowing and hands back
+# nodes of the wrong type (a `[?:GithubAuth]` read returning a `Repo`). The
+# real fix for that is `rm -rf .jac/cache` after any schema edit (see PLAN.md),
+# but re-filtering here costs nothing and turns a crash into an empty result.
+def _auth_node() -> GithubAuth | None {
+    for n in [root-->][?:GithubAuth] {
+        if isinstance(n, GithubAuth) {
+            return n;
+        }
+    }
+    return None;
+}
+
+def _all_repos() -> list[Repo] {
+    return [
+        r
+        for r in [root-->][?:Repo]
+        if isinstance(r, Repo)
+    ];
+}
+
+def _session_token() -> str {
+    auth: GithubAuth | None = _auth_node();
+    return auth.access_token if auth is not None else "";
+}
+
+def _repo_by_name(name: str) -> Repo | None {
+    for r in _all_repos() {
+        if r.full_name == name {
+            return r;
+        }
+    }
+    return None;
+}
+
+"""The Repo that owns `n` (an Issue/Cluster/PullRequest), walking the `owns`
+edge backwards. Beats the old `[root-->][?:Repo][0]` assumption now that more
+than one repo can be indexed at a time."""
+def _owning_repo(n: any) -> Repo | None {
+    owners: list[Repo] = [
+        o
+        for o in [n<-:owns:<-][?:Repo]
+        if isinstance(o, Repo)
+    ];
+    if len(owners) > 0 {
+        return owners[0];
+    }
+    fallback: list[Repo] = _all_repos();
+    return fallback[0] if len(fallback) > 0 else None;
+}
+
+"""Most recently selected repo - what /queue falls back to when the URL
+carries no ?repo=. Returns None before any repo has been picked."""
+def _active_repo() -> Repo | None {
+    all_repos: list[Repo] = _all_repos();
+    if len(all_repos) == 0 {
+        return None;
+    }
+    best: Repo = all_repos[0];
+    for r in all_repos {
+        if r.last_selected > best.last_selected {
+            best = r;
+        }
+    }
+    return best;
+}
+
+# ============================== GitHub auth + repo selection ==============================
+# Single round trip for the login screen: is anyone logged in, and if not,
+# where do we send the browser? `authenticated` is the only thing the client
+# gates on; `source` distinguishes a real OAuth session from the .env
+# GITHUB_TOKEN fallback (which keeps the demo runnable on a machine where no
+# OAuth app has been registered).
+walker:pub github_status {
+    has redirect_uri: str = "";
+
+    can check with Root entry {
+        callback: str = self.redirect_uri if self.redirect_uri else APP_URL;
+        auth: GithubAuth | None = _auth_node();
+
+        if auth is not None and auth.signed_out {
+            # Explicitly logged out - do NOT fall back to the .env token, or
+            # the logout button silently does nothing.
+            report {
+                "authenticated": False,
+                "source": "none",
+                "login": "",
+                "name": "",
+                "avatar_url": "",
+                "oauth_configured": oauth_configured(),
+                "token_available": bool(GITHUB_TOKEN),
+                "authorize_url": authorize_url(callback) if oauth_configured() else ""
+            };
+            disengage;
+        }
+
+        # A node with no token is a cleared session (github_logout, then
+        # github_use_env_token) - fall through to the .env fallback below
+        # rather than reporting an "oauth" session with an empty login.
+        if auth is not None and auth.access_token {
+            report {
+                "authenticated": True,
+                "source": "oauth",
+                "login": auth.login,
+                "name": auth.name,
+                "avatar_url": auth.avatar_url,
+                "oauth_configured": oauth_configured(),
+                "token_available": bool(GITHUB_TOKEN),
+                "authorize_url": authorize_url(callback) if oauth_configured() else ""
+            };
+            disengage;
+        }
+
+        if GITHUB_TOKEN {
+            user: GithubUser = get_authenticated_user();
+            if not user.error {
+                report {
+                    "authenticated": True,
+                    "source": "token",
+                    "login": user.login,
+                    "name": user.name,
+                    "avatar_url": user.avatar_url,
+                    "oauth_configured": oauth_configured(),
+                    "token_available": bool(GITHUB_TOKEN),
+                    "authorize_url": authorize_url(callback)
+                        if oauth_configured()
+                        else ""
+                };
+                disengage;
+            }
+        }
+
+        report {
+            "authenticated": False,
+            "source": "none",
+            "login": "",
+            "name": "",
+            "avatar_url": "",
+            "oauth_configured": oauth_configured(),
+            "token_available": bool(GITHUB_TOKEN),
+            "authorize_url": authorize_url(callback) if oauth_configured() else ""
+        };
+    }
+}
+
+# Second half of the OAuth dance: the browser comes back to APP_URL with
+# ?code=..., the client hands the code here, and we trade it for a token
+# server-side (the client secret never reaches the browser).
+walker:pub github_login {
+    has code: str;
+    has redirect_uri: str = "";
+
+    can login with Root entry {
+        callback: str = self.redirect_uri if self.redirect_uri else APP_URL;
+        exchanged = exchange_code_for_token(self.code, callback);
+        if exchanged.error {
+            report {"ok": False, "error": exchanged.error};
+            disengage;
+        }
+
+        user: GithubUser = get_authenticated_user(exchanged.access_token);
+        if user.error {
+            report {"ok": False, "error": user.error};
+            disengage;
+        }
+
+        auth: GithubAuth | None = _auth_node();
+        if auth is None {
+            auth = root ++> GithubAuth();
+        }
+        auth.login = user.login;
+        auth.name = user.name;
+        auth.avatar_url = user.avatar_url;
+        auth.access_token = exchanged.access_token;
+        auth.connected_at = time.time();
+        auth.signed_out = False;
+
+        report {
+            "ok": True,
+            "login": user.login,
+            "name": user.name,
+            "avatar_url": user.avatar_url
+        };
+    }
+}
+
+# Clears the session rather than deleting the node: the node's `signed_out`
+# flag is what stops github_status from re-authenticating off the .env
+# GITHUB_TOKEN fallback. Deleting it would make "log out" a no-op on any
+# machine that has that token set.
+walker:pub github_logout {
+    can logout with Root entry {
+        auth: GithubAuth | None = _auth_node();
+        if auth is None {
+            auth = root ++> GithubAuth();
+        }
+        auth.login = "";
+        auth.name = "";
+        auth.avatar_url = "";
+        auth.access_token = "";
+        auth.signed_out = True;
+        report {"ok": True};
+    }
+}
+
+# The way back in after logging out on a machine with no OAuth app registered
+# but a .env GITHUB_TOKEN present - it just clears the signed-out flag so the
+# fallback applies again. Not a login in any real sense, which is why the
+# login screen labels it as the configured token rather than as an account.
+walker:pub github_use_env_token {
+    can resume with Root entry {
+        if not GITHUB_TOKEN {
+            report {"ok": False, "error": "no GITHUB_TOKEN configured"};
+            disengage;
+        }
+        auth: GithubAuth | None = _auth_node();
+        if auth is not None {
+            auth.signed_out = False;
+        }
+        user: GithubUser = get_authenticated_user();
+        if user.error {
+            report {"ok": False, "error": user.error};
+            disengage;
+        }
+        report {"ok": True, "login": user.login};
+    }
+}
+
+# "Your projects" - every repo the logged-in account can actually act on
+# (owned, collaborator, or org member), straight from the GitHub API. No
+# fabricated list: with no token this reports zero repos and says why.
+walker:pub list_my_repos {
+    can list with Root entry {
+        token: str = _session_token();
+        if not token and not GITHUB_TOKEN {
+            report {"ok": False, "error": "not logged in", "repos": []};
+            disengage;
+        }
+
+        indexed: set[str] = {r.full_name for r in _all_repos()};
+        rows: list[dict] = [];
+        for r in list_repos(token) {
+            rows.append(
+                {
+                    "full_name": r.full_name,
+                    "description": r.description,
+                    "language": r.language,
+                    "stars": r.stars,
+                    "open_issues": r.open_issues,
+                    "private": r.private,
+                    "can_push": r.can_push,
+                    "default_branch": r.default_branch,
+                    "indexed": r.full_name in indexed
+                }
+            );
+        }
+        report {"ok": True, "repos": rows};
+    }
+}
+
+# Point Triage at a repo - one the user owns, or any public repo pasted as a
+# link ("choose another repo"). Clones the source so the AST parser has
+# something real to walk, then builds the code substrate. Deliberately does
+# NOT ingest issues: that costs three LLM calls per issue, so the client runs
+# it as a separate, progress-reported step (ingest_from_github).
+walker:pub select_repo {
+    has repo_url: str;
+
+    can select with Root entry {
+        token: str = _session_token();
+        full_name: str = parse_repo_full_name(self.repo_url);
+        if not full_name {
+            report {
+                "ok": False,
+                "error": f"couldn't read a repo out of [{self.repo_url}] - try owner/name or a github.com link"
+            };
+            disengage;
+        }
+
+        info: RepoSummary | None = get_repo(full_name, token);
+        if info is None {
+            report {
+                "ok": False,
+                # Echo BOTH what was typed and what it parsed to: when a paste
+                # drags in surrounding text the two differ visibly, which is
+                # far more useful than "check the name".
+                # Delimit with brackets, not quotes: a `'` placed directly
+                # after a `}` gets eaten by Jac's f-string handling.
+                "error": f"GitHub has no repo [{full_name}] (read from your input [{self.repo_url}]) - check the name, or that your account can see it"
+            };
+            disengage;
+        }
+
+        cloned: CloneResult = clone_repo(info.full_name, info.default_branch, token);
+        if cloned.error {
+            report {"ok": False, "error": cloned.error};
+            disengage;
+        }
+
+        repo: Repo | None = _repo_by_name(info.full_name);
+        if repo is None {
+            # NO `[0]` unwrap - see the note in reindex_repo and PLAN.md's
+            # environment-split table before "fixing" this either way.
+            repo = root ++> Repo(full_name=info.full_name);
+        }
+        repo.default_branch = info.default_branch;
+        repo.repo_path = cloned.path;
+        repo.last_selected = time.time();
+
+        already_indexed: list[File] = [repo->:owns:->][?:File];
+        files_indexed: int = 0;
+        import_edges: int = 0;
+        if len(already_indexed) > 0 {
+            files_indexed = repo.file_count;
+            import_edges = count_import_edges(already_indexed);
+        } else {
+            stats: dict[str, int] = build_code_substrate(cloned.path, repo);
+            files_indexed = stats["files_indexed"];
+            import_edges = stats["import_edges"];
+        }
+
+        report {
+            "ok": True,
+            "full_name": info.full_name,
+            "default_branch": info.default_branch,
+            "description": info.description,
+            "files_indexed": files_indexed,
+            "import_edges": import_edges,
+            # The real issue count, NOT RepoSummary.open_issues - that field
+            # includes pull requests and would overstate the queue.
+            "open_issues": count_open_issues(info.full_name, token),
+            "issues_in_graph": len([repo->:owns:->][?:Issue])
+        };
+    }
+}
+
+# Which repo the dashboard should show when the URL doesn't say (a reload of
+# /queue, or a direct visit). Most recently selected wins.
+walker:pub get_active_repo {
+    can pick with Root entry {
+        repo: Repo | None = _active_repo();
+        if repo is None {
+            report {"ok": False, "full_name": "", "file_count": 0};
+            disengage;
+        }
+        report {
+            "ok": True,
+            "full_name": repo.full_name,
+            "file_count": repo.file_count,
+            "issues_in_graph": len([repo->:owns:->][?:Issue])
+        };
+    }
+}
 
 # ============================== Person 1 — Graph & Agents ==============================
 walker:pub reindex_repo {
@@ -200,14 +578,18 @@ walker:pub ingest_issue {
     has created_at: str;
     has reactions: int = 0;
     has comment_velocity: int = 0;
+    # Which indexed repo this issue belongs to; defaults to the most recently
+    # selected one, which is what the live-ingestion demo beat wants.
+    has full_name: str = "";
 
     can ingest with Root entry {
-        repos: list[Repo] = [root-->][?:Repo];
-        if len(repos) == 0 {
-            report {"ok": False, "error": "no repo indexed - call reindex_repo first"};
+        repo: Repo | None = _repo_by_name(self.full_name)
+            if self.full_name
+            else _active_repo();
+        if repo is None {
+            report {"ok": False, "error": "no repo indexed - call select_repo first"};
             disengage;
         }
-        repo: Repo = repos[0];
 
         report _ingest_one(
             repo,
@@ -229,19 +611,29 @@ walker:pub ingest_issue {
 # which is the GitHub issue number) are skipped rather than duplicated.
 walker:pub ingest_from_github {
     has full_name: str = "";
+    # 0 = every open issue (what the seed repo wants). The client caps this
+    # when you point Triage at a big public repo, because each issue costs
+    # three local LLM calls - 400 of them is an hour, not a demo.
+    has limit: int = 0;
 
     can ingest with Root entry {
-        repos: list[Repo] = [root-->][?:Repo];
-        if len(repos) == 0 {
-            report {"ok": False, "error": "no repo indexed - call reindex_repo first"};
+        repo: Repo | None = _repo_by_name(self.full_name)
+            if self.full_name
+            else _active_repo();
+        if repo is None {
+            report {
+                "ok": False,
+                "error": "that repo isn't indexed yet - run select_repo (or reindex_repo) first"
+            };
             disengage;
         }
-        repo: Repo = repos[0];
-        target_full_name: str = self.full_name if self.full_name else repo.full_name;
+        target_full_name: str = repo.full_name;
 
         already: set[str] = {i.external_id for i in [repo->:owns:->][?:Issue]};
 
-        remote_issues: list[RemoteIssue] = fetch_open_issues(target_full_name);
+        remote_issues: list[RemoteIssue] = fetch_open_issues(
+            target_full_name, self.limit, _session_token()
+        );
         results: list[dict] = [];
         skipped: int = 0;
         for ri in remote_issues {
@@ -291,12 +683,11 @@ walker:pub generate_pr {
             disengage;
         }
 
-        repos: list[Repo] = [root-->][?:Repo];
-        if len(repos) == 0 {
+        repo: Repo | None = _owning_repo(cluster);
+        if repo is None {
             report {"ok": False, "error": "no repo indexed"};
             disengage;
         }
-        repo: Repo = repos[0];
 
         targets: list[File] = [cluster->:cluster_targets:->][?:File];
         target_path: str = cluster.cluster_key;
@@ -304,7 +695,7 @@ walker:pub generate_pr {
             target_path = targets[0].path;
         }
 
-        result = build_pr_for_cluster(cluster, repo);
+        result = build_pr_for_cluster(cluster, repo, _session_token());
         if not result.ok {
             report {"ok": False, "error": result.error};
             disengage;
@@ -353,17 +744,16 @@ walker:pub generate_pr_for_issue {
             disengage;
         }
 
-        repos: list[Repo] = [root-->][?:Repo];
-        if len(repos) == 0 {
+        repo: Repo | None = _owning_repo(issue);
+        if repo is None {
             report {"ok": False, "error": "no repo indexed"};
             disengage;
         }
-        repo: Repo = repos[0];
 
         targets: list[File] = [issue->:resolves_to:->][?:File];
         target_path: str = targets[0].path if len(targets) > 0 else "";
 
-        result = build_pr_for_issue(issue, repo);
+        result = build_pr_for_issue(issue, repo, _session_token());
         if not result.ok {
             report {"ok": False, "error": result.error};
             disengage;

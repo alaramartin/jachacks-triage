@@ -1,89 +1,238 @@
-"""Repo picker - "your projects" grid.
+"""Repo picker - "your projects", populated from the real GitHub account.
 
-LIVE DATA: the card's repo name and file count come from walker/get_queue against
-the real indexed graph. We deliberately do NOT fabricate a list of other repos -
-GitHub OAuth is WIP (see PLAN.md "WEBSITE UI"), so the only repo we can speak for
-is the one we hold a PAT for. The second tile is an explicitly disabled
-placeholder that says so rather than inventing repo names.
+LIVE DATA: walker/list_my_repos returns every repo the logged-in account owns
+or collaborates on, straight from the GitHub API - nothing on this screen is
+fabricated. Picking one runs walker/select_repo (clone + AST index) then
+walker/ingest_from_github (the Agent 1->2->3->4 cascade over its real open
+issues), reporting progress between the two because indexing is fast and
+triage is not. The whole queue gets triaged - no cap - because collapsing a
+hundred-issue queue into a handful of clusters is the entire point.
+
+"Choose another repo" takes any github.com link, so Triage can be pointed at a
+repo the user has never touched - the same two walkers, no special path.
 """
 
 import from "@jac/runtime" { useNavigate }
-sv import from ...main { get_queue }
-
-glob DEMO_REPO: str = "alaramartin/triage-demo";
+sv import from ...main {
+    github_status,
+    github_logout,
+    list_my_repos,
+    select_repo,
+    ingest_from_github
+}
 
 def:pub RepoPickerScreen -> JsxElement {
-    has repo_name: str = DEMO_REPO,
-        file_count: int = 0,
-        loading: bool = True;
+    has repos: list = [],
+        loading: bool = True,
+        error: str = "",
+        login: str = "",
+        avatar_url: str = "",
+        custom_url: str = "",
+        busy_repo: str = "",
+        progress: str = "";
 
     nav = useNavigate();
 
     async can with entry {
-        result = root spawn get_queue(full_name=DEMO_REPO);
+        status_result = root spawn github_status();
+        if status_result.reports and len(status_result.reports) > 0 {
+            status = status_result.reports[0];
+            if not status["authenticated"] {
+                nav("/");
+                return;
+            }
+            login = status["login"];
+            avatar_url = status["avatar_url"];
+        }
+
+        result = root spawn list_my_repos();
         if result.reports and len(result.reports) > 0 {
             resp = result.reports[0];
-            repo_name = resp.repo;
-            file_count = resp.file_count;
+            if resp["ok"] {
+                repos = resp["repos"];
+            } else {
+                error = resp["error"];
+            }
+        } else {
+            error = "Couldn't reach the server.";
         }
         loading = False;
     }
 
-    def handle_select(_e: MouseEvent) {
-        nav("/queue");
+    # Both entry points - a card click and a pasted link - run the same two
+    # walkers, so an unowned repo behaves exactly like one of your own.
+    async def open_repo(repo_url: str) -> None {
+        busy_repo = repo_url;
+        error = "";
+        progress = "Cloning and indexing the code graph...";
+
+        selected = root spawn select_repo(repo_url=repo_url);
+        if not (selected.reports and len(selected.reports) > 0) {
+            error = "Couldn't reach the server.";
+            busy_repo = "";
+            progress = "";
+            return;
+        }
+        picked = selected.reports[0];
+        if not picked["ok"] {
+            error = picked["error"];
+            busy_repo = "";
+            progress = "";
+            return;
+        }
+
+        full_name = picked["full_name"];
+        # picked["open_issues"] is the REAL open-issue count from select_repo
+        # (GitHub's own open_issues_count field includes PRs and overstates it).
+        total_open: int = picked["open_issues"] as int;
+        remaining: int = total_open - (picked["issues_in_graph"] as int);
+        if remaining > 0 {
+            # No cap: triaging the WHOLE queue is the point - a hundred issues
+            # collapsing into a handful of clusters is the thing worth seeing.
+            # It is genuinely slow (three local LLM calls per issue, ~9s each),
+            # so the estimate below sets expectations instead of hiding it.
+            minutes = max(1, round(remaining * 9 / 60));
+            progress = f"{picked['files_indexed']} files indexed. Triaging all {remaining} open issues - roughly {minutes} min, three LLM calls each.";
+            root spawn ingest_from_github(full_name=full_name, limit=0);
+        }
+
+        nav(f"/queue?repo={full_name}");
     }
 
-    owner = repo_name.split("/")[0] if "/" in repo_name else "";
-    short_name = repo_name.split("/")[-1];
+    async def handle_logout(_e: MouseEvent) -> None {
+        root spawn github_logout();
+        nav("/");
+    }
+
+    async def handle_custom_submit(e: FormEvent) -> None {
+        e.preventDefault();
+        if custom_url.strip() {
+            await open_repo(custom_url.strip());
+        }
+    }
 
     return
         <div className="min-h-screen px-6 sm:px-12 py-12 max-w-5xl mx-auto">
-            <div className="flex items-baseline gap-3">
-                <h1 className="text-xl font-semibold tracking-tight text-[var(--color-text)]">
-                    Your projects
-                </h1>
-                <span className="text-xs text-[var(--color-text-muted)]">
-                    repositories Triage has indexed
-                </span>
-            </div>
-            <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                <button
-                    onClick={handle_select}
-                    disabled={loading}
-                    className="group text-left rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 transition-colors hover:border-[var(--color-orange)] hover:bg-[var(--color-surface-raised)] disabled:opacity-40"
-                >
-                    <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                            <div className="text-xs font-mono text-[var(--color-text-muted)] truncate">
-                                {owner}
-                            </div>
-                            <div className="mt-0.5 text-base font-semibold text-[var(--color-text)] truncate">
-                                {short_name}
-                            </div>
-                        </div>
-                        <span
-                            className="shrink-0 text-[var(--color-text-muted)] transition-colors group-hover:text-[var(--color-orange)]"
-                        >
-                            →
-                        </span>
-                    </div>
-                    <div className="mt-6 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
-                        <span
-                            className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-green)]"
-                        />
-                        {"indexing..." if loading else str(file_count) + " files indexed"}
-                    </div>
-                </button>
-                <div
-                    className="rounded-xl border border-dashed border-[var(--color-border)] p-5 opacity-60"
-                >
-                    <div className="text-base font-medium text-[var(--color-text-muted)]">
-                        Connect more repositories
-                    </div>
-                    <div className="mt-6 text-xs text-[#5b616e]">
-                        GitHub OAuth is a work in progress. Only repositories with a configured token appear here.
-                    </div>
+            <div className="flex items-baseline justify-between gap-3">
+                <div className="flex items-baseline gap-3">
+                    <h1
+                        className="text-xl font-semibold tracking-tight text-[var(--color-text)]"
+                    >
+                        Your projects
+                    </h1>
+                    <span className="text-xs text-[var(--color-text-muted)]">
+                        repositories you own or collaborate on
+                    </span>
                 </div>
+                {login
+                and <div
+                    className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]"
+                >
+                    {avatar_url
+                    and <img
+                        src={avatar_url}
+                        alt=""
+                        width={20}
+                        height={20}
+                        className="h-5 w-5 shrink-0 rounded-full"
+                    />}
+                    <span className="font-mono">{login}</span>
+                    <button
+                        onClick={handle_logout}
+                        className="ml-1 underline underline-offset-2 hover:text-[var(--color-orange)]"
+                    >
+                        log out
+                    </button>
+                </div>}
+            </div>
+            {busy_repo
+            and <div
+                className="mt-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3"
+            >
+                <div className="font-mono text-sm text-[var(--color-green)]">
+                    {busy_repo}
+                </div>
+                <div className="mt-1 text-sm text-[var(--color-text-muted)]">
+                    {progress}
+                </div>
+            </div>}
+            {error
+            and <p className="mt-6 text-sm text-[var(--color-orange)]">{error}</p>}
+            <form onSubmit={handle_custom_submit} className="mt-6 flex gap-2">
+                <input
+                    value={custom_url}
+                    onChange={lambda (e: ChangeEvent) -> None { custom_url = e.target.value; }}
+                    placeholder="Or paste any repo: github.com/jaseci-labs/jac"
+                    className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-sm text-[var(--color-text)] placeholder:text-[#5b616e] focus:border-[var(--color-orange)] focus:outline-none"
+                />
+                <button
+                    type="submit"
+                    disabled={bool(busy_repo)}
+                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-2.5 text-sm font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-orange)] disabled:opacity-40"
+                >
+                    Choose another repo
+                </button>
+            </form>
+            {loading
+            and <p className="mt-8 text-sm text-[var(--color-text-muted)]">
+                Loading your repositories...
+            </p>}
+            {not loading
+            and len(repos) == 0
+            and not error
+            and <p className="mt-8 text-sm text-[var(--color-text-muted)]">
+                No repositories came back from GitHub for this account. Paste a repo link above to triage any public repo.
+            </p>}
+            <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {[
+                    <button
+                        key={r["full_name"]}
+                        onClick={lambda (_e: MouseEvent) -> None { open_repo(r["full_name"] as str); }}
+                        disabled={bool(busy_repo)}
+                        className="group text-left rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 transition-colors hover:border-[var(--color-orange)] hover:bg-[var(--color-surface-raised)] disabled:opacity-40"
+                    >
+                        <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                                <div
+                                    className="text-xs font-mono text-[var(--color-text-muted)] truncate"
+                                >
+                                    {r["full_name"].split("/")[0]}
+                                </div>
+                                <div
+                                    className="mt-0.5 text-base font-semibold text-[var(--color-text)] truncate"
+                                >
+                                    {r["full_name"].split("/")[1]}
+                                </div>
+                            </div>
+                            <span
+                                className="shrink-0 text-[var(--color-text-muted)] transition-colors group-hover:text-[var(--color-orange)]"
+                            >
+                                →
+                            </span>
+                        </div>
+                        <div
+                            className="mt-2 h-8 text-xs leading-4 text-[var(--color-text-muted)] overflow-hidden"
+                        >
+                            {r["description"]}
+                        </div>
+                        <div
+                            className="mt-4 flex items-center gap-3 text-xs text-[var(--color-text-muted)]"
+                        >
+                            <span className="inline-flex items-center gap-1.5">
+                                <span
+                                    className={"inline-block h-1.5 w-1.5 rounded-full " + (
+                                        "bg-[var(--color-green)]"
+                                            if r["indexed"]
+                                            else "bg-[#5b616e]"
+                                    )}
+                                />
+                                {str(r["open_issues"]) + " issues + PRs"}
+                            </span>
+                            {r["language"] and <span>{r["language"]}</span>}
+                            {r["private"] and <span>private</span>}
+                        </div>
+                    </button> for r in repos
+                ]}
             </div>
         </div>;
 }
