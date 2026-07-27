@@ -23,10 +23,13 @@ sv import from ...main {
 
 # Hover text on everything showcase mode disables (see the `showcase` flag,
 # reported by walker/github_status off TRIAGE_SHOWCASE on the deploy).
-glob SHOWCASE_TOOLTIP: str =
-    "We were too broke to afford an API key - triage runs on a model on our own "
-    "laptop, so this is disabled on the hosted build. Watch the demo video.";
+glob SHOWCASE_TOOLTIP: str = "We were too broke to afford an API key - triage runs on a model on our own "
+     "laptop, so this is disabled on the hosted build. Watch the demo video.";
 
+# The "paste any repo link" box is deliberately NOT rendered. The server side
+# of it is untouched - select_repo/parse_repo_full_name still accept an
+# arbitrary repo, and handle_custom_submit below still works - so putting the
+# control back is a JSX-only change.
 def:pub RepoPickerScreen -> JsxElement {
     has repos: list = [],
         loading: bool = True,
@@ -75,10 +78,15 @@ def:pub RepoPickerScreen -> JsxElement {
 
     # Both entry points - a card click and a pasted link - run the same two
     # walkers, so an unowned repo behaves exactly like one of your own.
+    # Ingestion runs detached (note: NOT awaited) - it is three LLM calls per
+    # issue, so awaiting it here is what made a click sit on this screen for
+    # minutes with nothing to show. The queue opens immediately instead and
+    # fills in as issues land.
+    async def start_ingest(full_name: str) -> None {
+        root spawn ingest_from_github(full_name=full_name, limit=0);
+    }
+
     async def open_repo(repo_url: str) -> None {
-        if showcase {
-            return;
-        }
         busy_repo = repo_url;
         error = "";
         progress = "Cloning and indexing the code graph...";
@@ -99,21 +107,13 @@ def:pub RepoPickerScreen -> JsxElement {
         }
 
         full_name = picked["full_name"];
-        # picked["open_issues"] is the REAL open-issue count from select_repo
-        # (GitHub's own open_issues_count field includes PRs and overstates it).
-        total_open: int = picked["open_issues"] as int;
-        remaining: int = total_open - (picked["issues_in_graph"] as int);
+        remaining = picked["open_issues"] - picked["issues_in_graph"];
         if remaining > 0 {
-            # No cap: triaging the WHOLE queue is the point - a hundred issues
-            # collapsing into a handful of clusters is the thing worth seeing.
-            # It is genuinely slow (three local LLM calls per issue, ~9s each),
-            # so the estimate below sets expectations instead of hiding it.
-            minutes = max(1, round(remaining * 9 / 60));
-            progress = f"{picked['files_indexed']} files indexed. Triaging all {remaining} open issues - roughly {minutes} min, three LLM calls each.";
-            root spawn ingest_from_github(full_name=full_name, limit=0);
+            start_ingest(full_name);
+            nav(f"/queue?repo={full_name}&ingesting=1");
+        } else {
+            nav(f"/queue?repo={full_name}");
         }
-
-        nav(f"/queue?repo={full_name}");
     }
 
     async def handle_logout(_e: MouseEvent) -> None {
@@ -179,9 +179,7 @@ def:pub RepoPickerScreen -> JsxElement {
             and <div
                 className="mt-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-sm text-[var(--color-text-muted)]"
             >
-                We were too broke to afford an API key, so triage runs on a model
-                on our own laptop - your repos below are real, but opening one is
-                disabled here.{" "}
+                We were too broke to afford an API key, so triage runs on a model on our own laptop - your repos below are real, but opening one is disabled here.{" "}
                 <a
                     href={demo_video_url or "#"}
                     target="_blank"
@@ -192,22 +190,6 @@ def:pub RepoPickerScreen -> JsxElement {
                 </a>
                 .
             </div>}
-            <form onSubmit={handle_custom_submit} className="mt-6 flex gap-2">
-                <input
-                    value={custom_url}
-                    onChange={lambda (e: ChangeEvent) -> None { custom_url = e.target.value; }}
-                    placeholder="Or paste any repo: github.com/jaseci-labs/jac"
-                    className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-sm text-[var(--color-text)] placeholder:text-[#5b616e] focus:border-[var(--color-orange)] focus:outline-none"
-                />
-                <button
-                    type="submit"
-                    disabled={bool(busy_repo) or showcase}
-                    title={SHOWCASE_TOOLTIP if showcase else ""}
-                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-2.5 text-sm font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-orange)] disabled:opacity-40"
-                >
-                    Choose another repo
-                </button>
-            </form>
             {loading
             and <p className="mt-8 text-sm text-[var(--color-text-muted)]">
                 Loading your repositories...
@@ -222,7 +204,9 @@ def:pub RepoPickerScreen -> JsxElement {
                 {[
                     <button
                         key={r["full_name"]}
-                        onClick={lambda (_e: MouseEvent) -> None { open_repo(r["full_name"] as str); }}
+                        onClick={lambda (_e: MouseEvent) -> None { open_repo(
+                            r["full_name"] as str
+                        ); }}
                         disabled={bool(busy_repo) or showcase}
                         title={SHOWCASE_TOOLTIP if showcase else ""}
                         className="group text-left rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 transition-colors hover:border-[var(--color-orange)] hover:bg-[var(--color-surface-raised)] disabled:opacity-40"

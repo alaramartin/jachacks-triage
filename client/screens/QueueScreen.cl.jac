@@ -7,6 +7,7 @@ urgency descending.
 """
 
 import from "@jac/runtime" { useNavigate, useLocation }
+import from react { useEffect }
 sv import from ...main {
     get_queue,
     generate_pr,
@@ -22,6 +23,12 @@ import from ..components.SettingsPanel { SettingsPanel }
 # navigated to (/queue?repo=owner/name); a bare /queue (reload, direct visit)
 # falls back to walker/get_active_repo - the most recently selected one. No
 # repo name is hardcoded anywhere on this screen.
+# The repo picker appends &ingesting=1 when it kicked off a background
+# ingest, which is this screen's cue to keep refetching while issues land.
+def _is_ingesting(search: str) -> bool {
+    return "ingesting=1" in search;
+}
+
 def _repo_from_search(search: str) -> str {
     raw = search[1:] if search.startswith("?") else search;
     for part in raw.split("&") {
@@ -102,6 +109,12 @@ def:pub QueueScreen -> JsxElement {
         pr_result: dict | None = None,
         settings_open: bool = False,
         active_repo: str = "",
+        # Background-ingest polling. `stable_polls` counts consecutive refetches
+        # that saw no new issues; three in a row means ingestion has finished
+        # (or died), so we stop refetching rather than poll forever.
+        ingesting: bool = False,
+        issue_total: int = -1,
+        stable_polls: int = 0,
         # id -> True while its walker is in flight, so the button can show a
         # spinner. Drafting a PR takes ten-plus seconds (real source read, a
         # full-file by llm() rewrite, then the GitHub call).
@@ -129,6 +142,16 @@ def:pub QueueScreen -> JsxElement {
                 "singletons": [_singleton_to_dict(s) for s in resp.singletons],
                 "unresolved": [_unresolved_to_dict(u) for u in resp.unresolved]
             };
+            seen = len(resp.singletons) + len(resp.unresolved);
+            for c in resp.clusters {
+                seen = seen + len(c.issues);
+            }
+            if seen == issue_total {
+                stable_polls = stable_polls + 1;
+            } else {
+                stable_polls = 0;
+            }
+            issue_total = seen;
         } else {
             load_error = "Couldn't reach the server - is reindex_repo done?";
         }
@@ -144,8 +167,30 @@ def:pub QueueScreen -> JsxElement {
             }
         }
         active_repo = name;
+        ingesting = _is_ingesting(location.search);
         await load_queue(name);
     }
+
+    # Refetch every 5s while a background ingest is running, so issues appear
+    # in the ranked queue as they are triaged instead of after a blank wait.
+    useEffect(
+        lambda {
+            if not ingesting {
+                return lambda { None; };
+            }
+            interval = setInterval(
+                lambda { if stable_polls >= 3 {
+                    ingesting = False;
+                    clearInterval(interval);
+                } else {
+                    load_queue(active_repo);
+                } },
+                5000
+            );
+            return lambda { clearInterval(interval); };
+        },
+        [ingesting, active_repo]
+    );
 
     def toggle_cluster(cluster_id: str) {
         expanded_id = None if expanded_id == cluster_id else cluster_id;
@@ -289,6 +334,12 @@ def:pub QueueScreen -> JsxElement {
                             queue["file_count"]
                         )} files indexed · ranked by structural blast radius, not by how the issue is worded.
                     </p>
+                    {ingesting
+                    and <p className="mt-2 text-sm text-[var(--color-green)]">
+                        Triaging the rest of the queue in the background - {str(
+                            issue_total
+                        )} issues placed so far, this list refreshes as they land.
+                    </p>}
                 </div>
                 <div className="shrink-0 pt-1">
                     <SettingsPanel

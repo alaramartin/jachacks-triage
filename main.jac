@@ -132,11 +132,14 @@ def _active_repo() -> Repo | None {
 # stops at the repo picker: login and "Your projects" are real and live, and
 # every walker that would reach an LLM refuses immediately instead of hanging
 # the pod for minutes. Unset locally => nothing below changes behavior at all.
-glob SHOWCASE: bool = os.environ.get("TRIAGE_SHOWCASE", "") not in ["", "0", "false"];
+glob SHOWCASE: bool = os.environ.get("TRIAGE_SHOWCASE", "") not in [
+         "",
+         "0",
+         "false"
+     ];
 glob DEMO_VIDEO_URL: str = os.environ.get("TRIAGE_DEMO_VIDEO_URL", "");
-glob SHOWCASE_MESSAGE: str =
-    "This is the hosted showcase build - triage runs on a local model, so indexing, "
-    "clustering and PR generation are disabled here. Watch the demo video instead.";
+glob SHOWCASE_MESSAGE: str = "This is the hosted showcase build - triage runs on a local model, so indexing, "
+     "clustering and PR generation are disabled here. Watch the demo video instead.";
 
 # ============================== GitHub auth + repo selection ==============================
 # Single round trip for the login screen: is anyone logged in, and if not,
@@ -1211,5 +1214,54 @@ cl {
 
     def:pub app -> JsxElement {
         return <ClientApp/>;
+    }
+}
+
+# Maintenance: collapse duplicate Repo nodes sharing a full_name, keeping the
+# richest one (most issues, then most files) and deleting the rest along with
+# everything they own. Duplicates get created when the "does this repo already
+# exist?" check comes back empty against a STALE .jac/cache - see PLAN.md. The
+# symptom is get_queue and get_active_repo disagreeing about the same repo.
+walker:pub dedupe_repos {
+    can go with Root entry {
+        by_name: dict[str, list[Repo]] = {};
+        for r in _all_repos() {
+            if r.full_name not in by_name {
+                by_name[r.full_name] = [];
+            }
+            by_name[r.full_name].append(r);
+        }
+
+        removed: list[dict] = [];
+        for (name, group) in by_name.items() {
+            if len(group) < 2 {
+                continue;
+            }
+            keeper: Repo = group[0];
+            for r in group {
+                r_issues: int = len([r->:owns:->][?:Issue]);
+                k_issues: int = len([keeper->:owns:->][?:Issue]);
+                if r_issues > k_issues
+                or (r_issues == k_issues and r.file_count > keeper.file_count) {
+                    keeper = r;
+                }
+            }
+            keeper_id: str = jid(keeper);
+            for r in group {
+                if jid(r) == keeper_id {
+                    continue;
+                }
+                # Collect BEFORE deleting - deleting while walking the `owns`
+                # edges invalidates the edge anchors mid-iteration.
+                doomed: list = [n for n in [r->:owns:->]];
+                for n in doomed {
+                    del n;
+                }
+                removed.append({"full_name": name, "owned_nodes_deleted": len(doomed)});
+                del r;
+            }
+        }
+
+        report {"ok": True, "duplicates_removed": len(removed), "detail": removed};
     }
 }
