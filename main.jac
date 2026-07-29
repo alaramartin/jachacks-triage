@@ -19,6 +19,7 @@ import from graph.nodes {
     fixes
 }
 import from integrations.ast_parser { build_code_substrate, count_import_edges }
+import from integrations.js_parser { discover_js_files }
 import from agents.blast_radius { compute_blast_radius, build_dependency_graph }
 import from agents.triage_agent { resolve_issue, assess_severity, estimate_diff_size }
 import from agents.ranking {
@@ -138,6 +139,17 @@ glob SHOWCASE: bool = os.environ.get("TRIAGE_SHOWCASE", "") not in [
          "false"
      ];
 glob DEMO_VIDEO_URL: str = os.environ.get("TRIAGE_DEMO_VIDEO_URL", "");
+
+# How long a Repo.ingesting_since lock is honored before being treated as
+# abandoned. Generous: a big repo legitimately takes an hour at ~9s/issue.
+glob INGEST_LOCK_TIMEOUT: float = 3600.0;
+
+# When this server process started. An ingest lock can only ever be held by a
+# run inside THIS process, so any lock predating startup is by definition dead
+# - the process was killed or restarted mid-run and its `finally` never ran.
+# Without this, a routine Ctrl-C during ingestion locks that repo out for a
+# full hour, which is not an acceptable dev-loop failure mode.
+glob PROCESS_STARTED_AT: float = time.time();
 glob SHOWCASE_MESSAGE: str = "This is the hosted showcase build - triage runs on a local model, so indexing, "
      "clustering and PR generation are disabled here. Watch the demo video instead.";
 
@@ -365,6 +377,11 @@ walker:pub select_repo {
             report {"ok": False, "error": SHOWCASE_MESSAGE};
             disengage;
         }
+        # Collapse any pre-existing duplicate Repo nodes BEFORE looking this
+        # one up, so we can't attach files to one node while get_queue reads
+        # another. See _collapse_duplicate_repos.
+        _collapse_duplicate_repos();
+
         token: str = _session_token();
         full_name: str = parse_repo_full_name(self.repo_url);
         if not full_name {
@@ -410,7 +427,28 @@ walker:pub select_repo {
         import_edges: int = 0;
         python_files: int = 0;
         js_files: int = 0;
+        # A repo indexed BEFORE TypeScript/JS support keeps its Python-only
+        # substrate forever, because this branch short-circuits. Rebuild it -
+        # but only when doing so destroys nothing: no JS/TS File nodes exist,
+        # the checkout actually has some, and no Issue has resolved onto any of
+        # these files yet (deleting File nodes would orphan resolves_to edges).
+        # A repo that HAS triaged issues keeps its substrate; re-indexing that
+        # safely means re-running the cascade, which belongs behind an explicit
+        # user action, not a silent side effect of opening the repo.
+        stale_substrate: bool = False;
         if len(already_indexed) > 0 {
+            indexed_js: int = len([f for f in already_indexed if f.language != "python"]);
+            stale_substrate = indexed_js == 0
+                and len([repo->:owns:->][?:Issue]) == 0
+                and len(discover_js_files(cloned.path)) > 0;
+            if stale_substrate {
+                for f in already_indexed {
+                    del f;
+                }
+            }
+        }
+
+        if len(already_indexed) > 0 and not stale_substrate {
             files_indexed = repo.file_count;
             import_edges = count_import_edges(already_indexed);
             python_files = len([f for f in already_indexed if f.language == "python"]);
@@ -483,6 +521,7 @@ walker:pub reindex_repo {
             report {"ok": False, "error": SHOWCASE_MESSAGE};
             disengage;
         }
+        _collapse_duplicate_repos();
         existing: list[Repo] = [root-->][?:Repo, full_name==self.full_name];
         repo: Repo;
         if len(existing) > 0 {
@@ -557,6 +596,24 @@ walker:pub debug_blast {
 # Shared by ingest_issue (one issue at a time, e.g. the live-ingestion demo
 # beat) and ingest_from_github (a whole repo's open issues at once) so both
 # entry points run the exact same Agent 1->2->3->4 cascade and can't drift.
+"""The Issue already on `repo` with this external_id, or None.
+
+Checked immediately before each write, NOT once per batch: an ingest run holds
+its "already present" snapshot for minutes while it makes three LLM calls per
+issue, so a snapshot taken at the start is stale by the time most issues are
+written. This is the last line of defence behind the Repo-level ingest lock."""
+def _existing_issue(repo: Repo, external_id: str) -> Issue | None {
+    if not external_id {
+        return None;
+    }
+    for i in [repo->:owns:->][?:Issue] {
+        if i.external_id == external_id {
+            return i;
+        }
+    }
+    return None;
+}
+
 def _ingest_one(
     repo: Repo,
     external_id: str,
@@ -566,6 +623,17 @@ def _ingest_one(
     reactions: int,
     comment_velocity: int
 ) -> dict {
+    duplicate: Issue | None = _existing_issue(repo, external_id);
+    if duplicate is not None {
+        resolved: list[File] = [duplicate->:resolves_to:->][?:File];
+        return {
+            "issue_id": jid(duplicate),
+            "resolved_to": resolved[0].path if len(resolved) > 0 else None,
+            "resolution_method": duplicate.resolution_method,
+            "skipped_duplicate": True
+        };
+    }
+
     files: list[File] = [repo->:owns:->][?:File];
     file_paths: list[str] = [f.path for f in files];
 
@@ -685,6 +753,10 @@ walker:pub ingest_from_github {
     # when you point Triage at a big public repo, because each issue costs
     # three local LLM calls - 400 of them is an hour, not a demo.
     has limit: int = 0;
+    # Escape hatch for a lock this process genuinely believes is live but
+    # isn't. Deliberately NOT wired to the UI - two concurrent ingests is the
+    # bug this lock exists to prevent.
+    has force: bool = False;
 
     can ingest with Root entry {
         if SHOWCASE {
@@ -703,20 +775,32 @@ walker:pub ingest_from_github {
         }
         target_full_name: str = repo.full_name;
 
-        already: set[str] = {i.external_id for i in [repo->:owns:->][?:Issue]};
+        # One ingest per repo at a time. Without this, a retried request or a
+        # second click starts a run whose "already ingested" view is minutes
+        # stale, and every issue the first run hasn't reached yet gets written
+        # twice. Observed in the wild: 20 GitHub issues -> 64 Issue nodes.
+        now: float = time.time();
+        lock_is_live: bool = repo.ingesting_since > PROCESS_STARTED_AT
+            and (now - repo.ingesting_since) < INGEST_LOCK_TIMEOUT;
+        if lock_is_live and not self.force {
+            report {
+                "ok": False,
+                "error": f"{target_full_name} is already being triaged - wait for that run to finish",
+                "already_ingesting": True
+            };
+            disengage;
+        }
+        repo.ingesting_since = now;
 
-        remote_issues: list[RemoteIssue] = fetch_open_issues(
-            target_full_name, self.limit, _session_token()
-        );
         results: list[dict] = [];
         skipped: int = 0;
-        for ri in remote_issues {
-            if ri.external_id in already {
-                skipped += 1;
-                continue;
-            }
-            results.append(
-                _ingest_one(
+        remote_issues: list[RemoteIssue] = [];
+        try {
+            remote_issues = fetch_open_issues(
+                target_full_name, self.limit, _session_token()
+            );
+            for ri in remote_issues {
+                outcome: dict = _ingest_one(
                     repo,
                     ri.external_id,
                     ri.title,
@@ -724,8 +808,20 @@ walker:pub ingest_from_github {
                     ri.created_at,
                     ri.reactions,
                     ri.comment_velocity
-                )
-            );
+                );
+                # _ingest_one re-checks per issue and reports rather than
+                # writing when the issue is already here, so the skip count
+                # stays accurate without a separate pre-pass snapshot.
+                if outcome.get("skipped_duplicate", False) {
+                    skipped += 1;
+                } else {
+                    results.append(outcome);
+                }
+            }
+        } finally {
+            # Always release, including on a mid-run failure - a stuck lock
+            # would make the repo permanently un-ingestable until it aged out.
+            repo.ingesting_since = 0.0;
         }
 
         # An uncapped run just enumerated the repo's entire open-issue list, so
@@ -908,9 +1004,16 @@ walker:pub get_issue_fix_preview {
             disengage;
         }
 
-        preview: IssueFixPreview = preview_issue_fix(
-            targets[0].path, issue.title, issue.body
-        );
+        # Same rule as generate_pr: an LLM failure is a reported error, never a
+        # 500 that leaves the client hanging.
+        try {
+            preview: IssueFixPreview = preview_issue_fix(
+                targets[0].path, issue.title, issue.body
+            );
+        } except Exception as e {
+            report {"ok": False, "error": f"couldn't reach the model: {e}"};
+            disengage;
+        }
         report {
             "ok": True,
             "issue_summary": preview.issue_summary,
@@ -1272,47 +1375,136 @@ cl {
 # richest one (most issues, then most files) and deleting the rest along with
 # everything they own. Duplicates get created when the "does this repo already
 # exist?" check comes back empty against a STALE .jac/cache - see PLAN.md. The
-# symptom is get_queue and get_active_repo disagreeing about the same repo.
-walker:pub dedupe_repos {
-    can go with Root entry {
-        by_name: dict[str, list[Repo]] = {};
-        for r in _all_repos() {
-            if r.full_name not in by_name {
-                by_name[r.full_name] = [];
-            }
-            by_name[r.full_name].append(r);
+# symptom is get_queue and get_active_repo disagreeing about the same repo -
+# or, as seen on AzizAkturin/TeamSnorlax-UX-Agent, select_repo indexing 19
+# files onto one node while get_queue reads "0 files" off the other.
+"""Shared by the dedupe_repos walker and by select_repo/reindex_repo, which
+run it BEFORE looking a repo up - collapsing on write is what stops the
+duplicate being observable at all, rather than only cleaning up after."""
+def _collapse_duplicate_repos() -> list[dict] {
+    by_name: dict[str, list[Repo]] = {};
+    for r in _all_repos() {
+        if r.full_name not in by_name {
+            by_name[r.full_name] = [];
         }
+        by_name[r.full_name].append(r);
+    }
 
-        removed: list[dict] = [];
-        for (name, group) in by_name.items() {
-            if len(group) < 2 {
+    removed: list[dict] = [];
+    for (name, group) in by_name.items() {
+        if len(group) < 2 {
+            continue;
+        }
+        keeper: Repo = group[0];
+        for r in group {
+            r_issues: int = len([r->:owns:->][?:Issue]);
+            k_issues: int = len([keeper->:owns:->][?:Issue]);
+            if r_issues > k_issues
+            or (r_issues == k_issues and r.file_count > keeper.file_count) {
+                keeper = r;
+            }
+        }
+        keeper_id: str = jid(keeper);
+        for r in group {
+            if jid(r) == keeper_id {
                 continue;
             }
-            keeper: Repo = group[0];
-            for r in group {
-                r_issues: int = len([r->:owns:->][?:Issue]);
-                k_issues: int = len([keeper->:owns:->][?:Issue]);
-                if r_issues > k_issues
-                or (r_issues == k_issues and r.file_count > keeper.file_count) {
-                    keeper = r;
-                }
+            # Collect BEFORE deleting - deleting while walking the `owns`
+            # edges invalidates the edge anchors mid-iteration.
+            doomed: list = [n for n in [r->:owns:->]];
+            for n in doomed {
+                del n;
             }
-            keeper_id: str = jid(keeper);
-            for r in group {
-                if jid(r) == keeper_id {
+            removed.append({"full_name": name, "owned_nodes_deleted": len(doomed)});
+            del r;
+        }
+    }
+    return removed;
+}
+
+walker:pub dedupe_repos {
+    can go with Root entry {
+        removed: list[dict] = _collapse_duplicate_repos();
+        report {"ok": True, "duplicates_removed": len(removed), "detail": removed};
+    }
+}
+
+# Maintenance: the repair half of the ingest-duplication fix. The lock and the
+# per-issue re-check stop NEW duplicates; this cleans up a graph that already
+# has them (20 real GitHub issues had become 64 Issue nodes). Keeps one Issue
+# per external_id per repo - the one that resolved onto a file, preferentially,
+# since a duplicate that parked as Unresolved carries less information - then
+# repairs the cluster counts the deletions invalidate.
+walker:pub dedupe_issues {
+    can go with Root entry {
+        _collapse_duplicate_repos();
+
+        removed_total: int = 0;
+        detail: list[dict] = [];
+        for repo in _all_repos() {
+            by_external: dict[str, list[Issue]] = {};
+            for i in [repo->:owns:->][?:Issue] {
+                key: str = i.external_id;
+                if key not in by_external {
+                    by_external[key] = [];
+                }
+                by_external[key].append(i);
+            }
+
+            removed_here: int = 0;
+            for (external_id, group) in by_external.items() {
+                if len(group) < 2 {
                     continue;
                 }
-                # Collect BEFORE deleting - deleting while walking the `owns`
-                # edges invalidates the edge anchors mid-iteration.
-                doomed: list = [n for n in [r->:owns:->]];
-                for n in doomed {
-                    del n;
+                # Prefer a copy that actually resolved onto a code node; among
+                # equals the first wins, so the surviving node is stable.
+                keeper: Issue = group[0];
+                for i in group {
+                    if len([i->:resolves_to:->]) > 0
+                    and len([keeper->:resolves_to:->]) == 0 {
+                        keeper = i;
+                    }
                 }
-                removed.append({"full_name": name, "owned_nodes_deleted": len(doomed)});
-                del r;
+                keeper_id: str = jid(keeper);
+                doomed: list[Issue] = [
+                    i
+                    for i in group
+                    if jid(i) != keeper_id
+                ];
+                for i in doomed {
+                    del i;
+                }
+                removed_here += len(doomed);
+            }
+
+            # Deleting members leaves every cluster's issue_count overstated,
+            # which is what the UI actually renders ("12 issues" over 5 rows).
+            for c in [repo->:owns:->][?:Cluster] {
+                members: list[Issue] = [c<-:grouped_in:<-];
+                if len(members) == 0 {
+                    del c;
+                    continue;
+                }
+                c.issue_count = len(members);
+            }
+
+            # Same for the parking lot's counter.
+            for u in [repo->:owns:->][?:Unresolved] {
+                u.count = len([u->:parked:->]);
+            }
+
+            if removed_here > 0 {
+                detail.append(
+                    {
+                        "full_name": repo.full_name,
+                        "issues_deleted": removed_here,
+                        "issues_remaining": len([repo->:owns:->][?:Issue])
+                    }
+                );
+                removed_total += removed_here;
             }
         }
 
-        report {"ok": True, "duplicates_removed": len(removed), "detail": removed};
+        report {"ok": True, "issues_deleted": removed_total, "detail": detail};
     }
 }

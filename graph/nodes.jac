@@ -34,6 +34,13 @@ node Repo {
     # on every read - "this repo has no issues" and "this repo has 40 issues
     # nobody triaged yet" look identical otherwise.
     has open_issue_count: int = -1;
+    # Unix ts of the in-flight ingest_from_github for this repo, 0.0 when idle.
+    # An ingest takes ~9s per issue and snapshots "what's already here" once at
+    # the start, so two overlapping runs re-ingest everything the first hasn't
+    # reached yet - that is how 20 GitHub issues became 64 Issue nodes with
+    # multiplicities of 1-5. Treated as stale after INGEST_LOCK_TIMEOUT so a
+    # crashed run can't wedge the repo permanently.
+    has ingesting_since: float = 0.0;
 }
 
 node File {

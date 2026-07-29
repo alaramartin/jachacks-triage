@@ -1838,3 +1838,81 @@ Also folded into task 2, found while diagnosing this: **duplicate `Repo` nodes**
 `get_queue` each independently take `matches[0]`, so a read can land on the node that has no
 files yet — which is what produced the "indexed 0 files" report on a repo that has 19 Python
 files. `dedupe_repos` exists but nothing prevents the duplicate being created in the first place.
+
+## Task 2 — the two bugs (2026-07-28) — DONE
+
+### 2a. Duplicated issues — fixed and repaired
+
+Root cause confirmed exactly as predicted: `ingest_from_github` snapshotted "what's already
+here" **once, before the loop**, then spent ~9s per issue. Any second run starting mid-flight
+re-ingested everything the first hadn't reached. Caught live during task 1 testing — a single
+curl produced `fetched: 4, ingested: 1, skipped_existing: 3`, i.e. the request ran twice and
+was saved only by lucky timing.
+
+- [x] **Per-issue re-check** (`_existing_issue`, called inside `_ingest_one`) — the batch
+      snapshot is gone; every write re-reads the graph immediately beforehand. Returns a
+      `skipped_duplicate` outcome so the skip count stays honest.
+- [x] **Per-repo ingest lock** (`Repo.ingesting_since` + `INGEST_LOCK_TIMEOUT`), released in a
+      `finally`. Second concurrent run on the same repo is refused; a *different* repo is
+      unaffected (verified both).
+- [x] **Stale locks die at process boot.** A killed server never runs its `finally`, and an
+      hour-long lockout after a routine Ctrl-C is not acceptable. A lock is only honored if
+      `ingesting_since > PROCESS_STARTED_AT` — a lock predating this process cannot be held by
+      a run inside it. Found by actually killing the server mid-ingest, not by inspection.
+      `force: bool` on the walker as a manual override; deliberately not wired to the UI.
+- [x] **Client guard** — the repo picker returns early while a select/ingest is in flight.
+- [x] **`walker:pub dedupe_issues`** repairs an already-polluted graph: one Issue per
+      `external_id` per repo (preferring a copy that resolved onto a code node), then repairs
+      the cluster `issue_count`s and the `Unresolved.count` that the deletions invalidate, and
+      drops clusters left with no members.
+
+**Repair result on the live graph — 64 Issue nodes → 20, matching the 20 real GitHub issues:**
+
+| | before | after |
+| --- | --- | --- |
+| `core/validation.py` cluster | 6 members (`8,9,10,10,11,11`) | **4** (`8,9,10,11`), blast radius 14 |
+| `services/upload.py` cluster | 10 members (`16`×5, `17`×5) | **2** (`16,17`) |
+| standalone | 30 | 10 |
+| unresolved | 18 | 4 |
+
+Verified afterwards across all five indexed repos: **zero duplicate external_ids anywhere**.
+
+### 2b. Generate PR — fixed
+
+Root cause confirmed by direct reproduction: `.env` line 34 was a bare `TRIAGE_FIX_MODEL=`,
+and **`os.environ.get(name, default)` returns `""` for a set-but-empty variable, not the
+default**. So `fix_llm = Model(model_name="")` and every generation died with
+`litellm.BadRequestError: LLM Provider NOT provided ... You passed model=`. The walker 500'd,
+the client's `root spawn` threw, and `mark_generating(id, False)` never ran — hence a button
+stuck on "Generating" forever. Introduced by `dc7f1bb` (showcase mode), which added the empty
+var.
+
+- [x] **`_env()` treats blank as absent** in `pr_agent.jac`.
+- [x] **`load_dotenv()` called explicitly** before the module's globs. `.env` was only ever
+      loaded as a side effect of importing byllm, making every module-level env read depend on
+      import order — `jac run` saw no environment at all.
+- [x] **Never 500.** `generate_fix` and `preview_issue_fix` are wrapped; an LLM failure becomes
+      `{ok: false, error: "the fix model (<name>) failed: ..."}`, which the UI already renders.
+- [x] **`try`/`finally` in all three client handlers** (two in `QueueScreen`, one in
+      `cluster_view`) so the spinner clears even when the walker throws.
+- [x] **Boot banner** — `[triage] PR fix model: ollama/qwen2.5-coder:7b` on stdout at startup,
+      so a misconfigured model is visible immediately instead of on click.
+
+**Verified:** `generate_fix` against the real `core/validation.py` now returns 960 bytes of
+**valid Python** with a correct `None` guard — the exact call that previously raised. The
+GitHub write itself was deliberately NOT exercised: opening a PR moves that cluster into
+Drafted PRs permanently (see the demo-day trap note above), so the last click is the human's.
+
+⚠️ **One generate_fix call takes ~86 seconds** on the local 7B model. The PR button is
+therefore a ~1.5 minute wait even when everything works. That belongs to task 3.
+
+### Also folded in
+
+- [x] **Duplicate `Repo` nodes** — the cause of the "indexed 0 files" report on a repo with 19
+      Python files. `_collapse_duplicate_repos()` is extracted from the `dedupe_repos` walker
+      and now runs *before* the lookup in `select_repo` and `reindex_repo`, so a duplicate can
+      never be observed rather than only being cleaned up afterwards.
+- [x] **Repos indexed before TS/JS support** now re-index automatically — but **only when that
+      destroys nothing**: no JS/TS File nodes exist, the checkout has some, and no Issue has
+      resolved onto the existing files. `TeamSnorlax-UX-Agent` went 19 → **72 files** (19 py +
+      53 ts/js); `triage-demo`, which has 20 triaged issues, was correctly left untouched.

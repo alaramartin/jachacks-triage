@@ -12,6 +12,7 @@ call or GitHub write happens."""
 
 import os;
 import re;
+import from dotenv { load_dotenv }
 import from graph.nodes {
     Cluster,
     File,
@@ -24,6 +25,23 @@ import from graph.nodes {
 import from integrations.github { create_pull_request, PullRequestResult }
 import from jaclang.byllm.lib { Model }
 
+# `jac run` does not load .env on its own - the environment only appears once
+# something imports byllm, which drags in litellm's dotenv call. That makes
+# every module-level env read here depend on import ORDER. Loading it
+# explicitly, before the globs below, removes that coupling.
+glob _DOTENV: bool = load_dotenv();
+
+"""os.environ.get(name, default) returns the EMPTY STRING for a variable that
+is present but blank - it does NOT fall back to the default. `.env` carried a
+bare `TRIAGE_FIX_MODEL=` (added for the hosted showcase build), so the fix
+model was constructed as Model(model_name="") and every single PR generation
+died with 'LLM Provider NOT provided ... You passed model='. The walker then
+500'd and the button span forever. Treat blank as absent."""
+def _env(name: str, fallback: str = "") -> str {
+    value: str = os.environ.get(name, "").strip();
+    return value if value else fallback;
+}
+
 # Full-file code generation is a much harder structured-output task than the
 # short classification calls elsewhere (triage/clustering) - the project-wide
 # default model (jac.toml, qwen2.5:7b) reliably truncates mid-string on it.
@@ -31,9 +49,20 @@ import from jaclang.byllm.lib { Model }
 # any paid API key.
 # Overridable via TRIAGE_FIX_MODEL so a hosted deploy isn't stuck naming a
 # local Ollama model it can never reach. Unset => unchanged locally.
-glob fix_llm: Model = Model(
-    model_name=os.environ.get("TRIAGE_FIX_MODEL", "ollama/qwen2.5-coder:7b")
-);
+glob FIX_MODEL: str = _env("TRIAGE_FIX_MODEL", "ollama/qwen2.5-coder:7b");
+glob fix_llm: Model = Model(model_name=FIX_MODEL);
+
+# Printed once at import. A misconfigured model used to be invisible until
+# somebody clicked Generate PR and waited; now it is on stdout at boot.
+# The def must precede the glob: module-level globs are evaluated in source
+# order, so a forward reference here is a runtime NameError that `jac check`
+# does not catch.
+def _announce_model() -> bool {
+    print(f"[triage] PR fix model: {FIX_MODEL}");
+    return True;
+}
+
+glob _MODEL_BANNER: bool = _announce_model();
 
 glob SENSITIVE_SUBSTRINGS: list[str] = [
          ".env",
@@ -233,9 +262,20 @@ def _build_pr(
     max_attempts: int = 3;
     attempt: int = 0;
     while attempt < max_attempts {
-        fix = generate_fix(
-            target.path, source, root_cause, proposed_fix, summaries, retry_hint
-        );
+        # An unreachable/misconfigured model raises out of by llm(). Left
+        # uncaught it becomes a 500, the client's spawn throws, and the button
+        # spins forever with nothing on screen saying why - which is exactly
+        # how the empty TRIAGE_FIX_MODEL presented. Report it instead.
+        try {
+            fix = generate_fix(
+                target.path, source, root_cause, proposed_fix, summaries, retry_hint
+            );
+        } except Exception as e {
+            return PullRequestResult(
+                ok=False,
+                error=f"the fix model ({FIX_MODEL}) failed: {e}"
+            );
+        }
         syntax_error = _syntax_error(fix.new_content, target.path);
         if syntax_error {
             repaired: str = _repair_module_docstring(fix.new_content);
@@ -312,7 +352,12 @@ def build_pr_for_issue(issue: Issue, repo: Repo, token: str = "") -> PullRequest
         );
     }
     target: File = targets[0];
-    preview: IssueFixPreview = preview_issue_fix(target.path, issue.title, issue.body);
+    preview: IssueFixPreview = IssueFixPreview(issue_summary="", fix_summary="");
+    try {
+        preview = preview_issue_fix(target.path, issue.title, issue.body);
+    } except Exception as e {
+        return PullRequestResult(ok=False, error=f"couldn't diagnose the issue: {e}");
+    }
     return _build_pr(
         target,
         [issue],

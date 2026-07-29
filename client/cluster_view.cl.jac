@@ -79,11 +79,21 @@ def:pub ClusterView -> JsxElement {
             return;
         }
         pr_pending = True;
-        result = root spawn generate_pr(cluster_id=detail["id"] as str);
-        if result.reports and len(result.reports) > 0 {
-            pr_result = result.reports[0] as dict;
+        # `finally` so a walker error can never strand the button on
+        # "Generating" - same fix as QueueScreen's handlers.
+        try {
+            result = root spawn generate_pr(cluster_id=detail["id"] as str);
+            if result.reports and len(result.reports) > 0 {
+                pr_result = result.reports[0] as dict;
+            }
+        } except Exception as e {
+            pr_result = {"ok": False, "error": str(e)};
+        } finally {
+            pr_pending = False;
+            # Same reason as QueueScreen: the result banner is at the top of
+            # the page and the button that triggered it may not be.
+            window.scrollTo({"top": 0, "behavior": "smooth"});
         }
-        pr_pending = False;
     }
 
     def dismiss_banner(_e: MouseEvent) {

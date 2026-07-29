@@ -242,24 +242,50 @@ def:pub QueueScreen -> JsxElement {
     # On success we refetch rather than patching state by hand: get_queue now
     # reports pr_number/pr_url off the `fixes` edge, so the row moves itself
     # into Drafted PRs and stays there across a reload.
+    # The result banner (PR opened, or the reason it wasn't) renders at the top
+    # of the page, but the button that triggered it can be far down a long
+    # queue - so without this the click appears to do nothing. Generation takes
+    # over a minute, which makes a silent finish especially confusing.
+    def scroll_to_banner {
+        window.scrollTo({"top": 0, "behavior": "smooth"});
+    }
+
+    # The `finally` is load-bearing: if the walker 500s, `root spawn` throws,
+    # and without it mark_generating(id, False) never runs - the button sits on
+    # "Generating" forever with nothing on screen explaining why. That is
+    # precisely how the broken fix model presented for weeks.
     async def handle_generate_pr(cluster_id: str) {
         mark_generating(cluster_id, True);
-        result = root spawn generate_pr(cluster_id=cluster_id);
-        if result.reports and len(result.reports) > 0 {
-            pr_result = result.reports[0] as dict;
+        try {
+            result = root spawn generate_pr(cluster_id=cluster_id);
+            if result.reports and len(result.reports) > 0 {
+                pr_result = result.reports[0] as dict;
+                scroll_to_banner();
+            }
+            await load_queue(active_repo);
+        } except Exception as e {
+            pr_result = {"ok": False, "error": str(e)};
+            scroll_to_banner();
+        } finally {
+            mark_generating(cluster_id, False);
         }
-        await load_queue(active_repo);
-        mark_generating(cluster_id, False);
     }
 
     async def handle_generate_issue_pr(issue_id: str) {
         mark_generating(issue_id, True);
-        result = root spawn generate_pr_for_issue(issue_id=issue_id);
-        if result.reports and len(result.reports) > 0 {
-            pr_result = result.reports[0] as dict;
+        try {
+            result = root spawn generate_pr_for_issue(issue_id=issue_id);
+            if result.reports and len(result.reports) > 0 {
+                pr_result = result.reports[0] as dict;
+                scroll_to_banner();
+            }
+            await load_queue(active_repo);
+        } except Exception as e {
+            pr_result = {"ok": False, "error": str(e)};
+            scroll_to_banner();
+        } finally {
+            mark_generating(issue_id, False);
         }
-        await load_queue(active_repo);
-        mark_generating(issue_id, False);
     }
 
     def handle_open_detail(cluster_id: str) {
