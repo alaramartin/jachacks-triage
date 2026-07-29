@@ -185,7 +185,12 @@ def build_file_summaries(file_paths: list[str], repo_root: str | None) -> dict[s
 # first, and only those reach the model. Nothing here decides an answer - it
 # only decides what the model is allowed to see - so the resolution itself is
 # still the model's call on a small, honest candidate set.
-glob CANDIDATE_CAP: int = 40;
+# 30, not 40, and not 20. Measured on the 11 issues already resolved across
+# flask (83 files) and jac (95 files): at 40 the correct file ranked as low as
+# 27th, so 20 and 25 both DROPPED one issue's real target off the list, while 30
+# keeps every one of them. A smaller list is meaningfully cheaper - the resolve
+# call is prefill-dominated - but not at the price of changing an answer.
+glob CANDIDATE_CAP: int = 30;
 
 # Words that appear in half a repo's paths and every bug report - matching on
 # them ranks nothing above anything else.
@@ -434,4 +439,115 @@ def resolve_issue(title: str, body: str, file_paths: list[str], repo_root: str |
         conf = fallback.confidence;
     }
     return Resolution(path=None, confidence=conf, method="none");
+}
+
+# ============================== Merged assessment ==============================
+# Everything above still exists and is what the unit tests exercise. What
+# ingestion actually calls is below, and the difference is purely how many
+# round trips it takes.
+#
+# Each by llm() call carries ~1.2s of fixed cost on a local 7B (measured), and
+# ingestion used to make three or four of them per issue for facts that are
+# entirely independent of each other. Merging them into one structured call
+# removes that fixed cost without changing what is being asked - the semstrings
+# below are the originals, reworded only where a field name changed.
+
+obj IssueImpact {
+    has severity: int;
+    has estimated_diff_lines: int;
+}
+
+sem IssueImpact = "How bad a bug report is and how big its fix looks.";
+sem IssueImpact.severity = "How severe this report is, 1 (cosmetic/trivial) to 10 (critical: crashes, data loss, or breaks core functionality for many users). Typos and feature requests are low; crash reports and broad-impact bugs are high.";
+sem IssueImpact.estimated_diff_lines = "How many lines of code a fix would plausibly require, based on how localized or sprawling the problem sounds - ~3 for a one-line typo, ~40 for a moderate logic fix, 150+ for a large refactor.";
+
+"""Severity + fix size in one call, for issues already placed by an explicit
+signal (traceback, path, symbol) and so needing no LLM resolution at all."""
+def assess_impact(title: str, body: str) -> IssueImpact by llm(temperature=0.0);
+sem assess_impact = "Read one bug report and judge how severe it is and how large a fix it would need.";
+sem assess_impact.title = "The issue title as reported by a user.";
+sem assess_impact.body = "The issue body, which may include a stack trace.";
+
+# ⚠️ DO NOT merge the VAGUE gate into the resolution call. It was tried and
+# reverted on 2026-07-29, and the failure is instructive: asked for
+# specificity AND a file path in one structured response, the model answers
+# CONCRETE and supplies a path at 0.8-0.9 confidence for reports that contain
+# nothing at all. On the seed repo, "doesn't work" (#26) and "pls fix asap
+# thanks" (#27) both got placed on utils/csv_export.py and then CLUSTERED
+# TOGETHER, and the parked set collapsed from 4 issues to 2.
+#
+# Asked on its own, as a binary judgment with nothing else to produce, the same
+# model correctly calls those VAGUE. The separate call is not redundant - it is
+# the thing that stops the system guessing, which is the property the whole
+# project is built on (CLAUDE.md §5: "Do not guess", and the demo beat that
+# points at the parked issues). The ~1.2s it costs is the price of that.
+
+obj TriagedIssue {
+    has path: str | None = None;
+    has confidence: float = 0.0;
+    has method: str = "none";
+    has severity: int = 0;
+    has estimated_diff_lines: int = 0;
+}
+
+"""What ingestion calls: resolution AND impact for one issue, in as few LLM
+round trips as the case allows.
+
+  explicit signal placed it   1 call  (was 3: severity + diff + nothing else)
+  too vague to place          2 calls (was 3)
+  model has to place it       3 calls (was 4)
+
+Decision logic is IDENTICAL to resolve_issue + assess_severity +
+estimate_diff_size - explicit signals win outright at 0.95, the VAGUE gate parks
+without guessing, the path must appear in file_paths, and the 0.55 confidence
+threshold is unchanged. The only thing removed is the fixed per-call overhead of
+asking for severity and fix size separately, which are independent of each other
+and of resolution."""
+def triage_issue(
+    title: str, body: str, file_paths: list[str], repo_root: str | None = None
+) -> TriagedIssue {
+    explicit_path = explicit_resolve(body, file_paths, repo_root);
+    if explicit_path {
+        impact = assess_impact(title, body);
+        return TriagedIssue(
+            path=explicit_path,
+            confidence=0.95,
+            method="explicit",
+            severity=impact.severity,
+            estimated_diff_lines=impact.estimated_diff_lines
+        );
+    }
+
+    # The specificity gate stays its own focused call - see the warning above.
+    impact = assess_impact(title, body);
+    if assess_specificity(title, body) == ReportSpecificity.VAGUE {
+        return TriagedIssue(
+            path=None,
+            confidence=0.0,
+            method="none",
+            severity=impact.severity,
+            estimated_diff_lines=impact.estimated_diff_lines
+        );
+    }
+
+    # Only the plausible candidates reach the model - see shortlist_candidates.
+    # On a repo small enough to fit, this IS the full file list.
+    (candidates, file_summaries) = shortlist_candidates(title, body, file_paths, repo_root);
+    fallback = llm_resolve(title, body, candidates, file_summaries);
+    if fallback.path and fallback.path in file_paths and fallback.confidence >= 0.55 {
+        return TriagedIssue(
+            path=fallback.path,
+            confidence=fallback.confidence,
+            method="llm",
+            severity=impact.severity,
+            estimated_diff_lines=impact.estimated_diff_lines
+        );
+    }
+    return TriagedIssue(
+        path=None,
+        confidence=fallback.confidence if fallback.path else 0.0,
+        method="none",
+        severity=impact.severity,
+        estimated_diff_lines=impact.estimated_diff_lines
+    );
 }

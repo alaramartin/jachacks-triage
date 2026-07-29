@@ -1996,3 +1996,92 @@ click stays the human's.
 
 ⚠️ **Cost:** `explain_fix` is a second LLM call, adding ~20s on top of generate_fix's ~60s.
 Generating a PR is now a **~80 second** operation locally. Task 3.
+
+## Task 3 — Make triage faster (2026-07-29) — DONE
+
+Measured first, then optimized. Full measurement method and the raw baseline table are in the
+plan file; the load-bearing numbers are repeated here.
+
+**Result: a full cold ingest of the seed repo's 20 issues went 194s → 83s (2.3x). Generating a
+PR went ~80-95s → ~35s. A re-ingest of already-seen issues is 49s, all of it clustering.**
+
+### ⛔ Parallelism is a measured dead end — do not retry it
+
+8 identical LLM calls: 1 worker 9.47s wall, 2 workers 9.04s, 4 workers 8.97s. Wall time is
+FLAT; per-call latency rises linearly (1.18s → 2.12s → 3.64s). The M2 GPU is saturated by a
+single request, so a thread pool buys nothing and only risks concurrent graph writes. The only
+levers that work are **fewer calls, fewer tokens, and not repeating work**.
+
+Throughput for reference: prefill ~200-250 tok/s, **decode ~19 tok/s**. Output length dominates.
+
+### What shipped
+
+- **Clustering is coalesced.** `maybe_cluster` re-reads all issues on a file and overwrites
+  every cluster field, so for a file with N issues the first N-1 calls were pure discarded work
+  at ~7.8s each. Batch ingest now defers clustering, draining every 10 issues and once at the
+  end. Single-issue `ingest_issue` still fires the whole cascade immediately, so the reactive
+  demo beat is unchanged.
+- **PR fixes are targeted edits, not full-file rewrites.** `generate_edits` returns exact-string
+  `{old, new}` pairs; each `old` must match exactly once or it falls back to the old full-file
+  path. Measured 34.5s → 13.5s on `core/validation.py`, and the gap widens with file size. This
+  narrows rather than contradicts the original "full file, not a patch" call: the problem with
+  patches was line-number arithmetic, which exact-string matching does not have.
+- **Assessment cache** keyed by `sha256(prompt_version + model + repo + file_count + title +
+  body)`. Re-ingesting seen issues costs zero LLM calls. Bump `PROMPT_VERSION` when a semstring
+  changes or it will serve answers the current prompts would not produce.
+- **Severity + fix-size merged into one call** (`assess_impact`). Independent of resolution, so
+  it cannot change which file an issue lands on. Explicit-resolution issues went 3 calls → 1.
+- **`CANDIDATE_CAP` 40 → 30**, chosen by measurement, not taste. See below.
+- **Model warmup at boot** — the first call after a cold start pays ~2.5s extra (3.80s vs 1.21s
+  steady state). Paid once in a background thread instead of by the first user.
+- **Progress + ETA** in the queue banner ("N of M placed, about X min left"), off the stored
+  `open_issue_count`.
+- **Interrupted-batch repair.** Deferring clustering introduced a real bug: a run killed
+  mid-flight left issues resolved but unclustered, and a re-ingest SKIPS those issues as
+  duplicates so nothing ever marked them dirty. The final drain now also sweeps for files with
+  2+ resolved issues and no cluster. Found by hitting it, not by inspection.
+
+### What was reverted, and why — the quality gate did its job
+
+**Merging the VAGUE gate into the resolution call: REVERTED.** This was the headline idea and it
+broke the property the project is built on. Asked for specificity *and* a file path in one
+structured response, the model answers CONCRETE and supplies a path at 0.8-0.9 confidence for
+reports containing nothing: `#26 "doesn't work"` and `#27 "pls fix asap thanks"` were both placed
+on `utils/csv_export.py` **and then clustered together**, and the parked set collapsed from 4
+issues to 2. Asked on its own, as a binary judgment with nothing else to produce, the same model
+calls them VAGUE correctly. The separate ~1.2s call is what stops the system guessing (CLAUDE.md
+§5, and the demo beat that points at the parked issues). There is now a loud comment in
+`triage_agent.jac` so nobody re-merges it.
+
+**`CANDIDATE_CAP` 20: REVERTED to 30.** Tested without spending any LLM time, by checking whether
+each of the 11 already-resolved issues across flask (83 files) and jac (95 files) still has its
+known target inside the shortlist:
+
+| cap | misses | worst rank of a correct target |
+| --- | --- | --- |
+| 25 | **1** (jac #7767) | 20 |
+| 30 | 0 | 26 |
+| 40 | 0 | 27 |
+
+30 is the smallest cap that loses nothing.
+
+**Newest-first ingest order: REVERTED.** Ingest order is not cosmetic — it sets the order issues
+appear in Agent 3's clustering prompt, and on borderline pairs that flips the gate's judgment.
+Sorting an uncapped run newest-first changed which 2-issue cluster formed on the seed repo, so
+uncapped runs stay created-ascending.
+
+**`explain_fix` trimming: deliberately NOT done.** Cutting the PR explanation would have saved
+~8s of a ~35s operation by degrading the exact thing task 5 was asked to improve. Not a trade
+worth making once the other 60s were already gone.
+
+### Verification
+
+Full `reset_demo` → re-ingest against the locked baseline: **resolution identical for all 20
+issues, parked set identical (`18, 20, 26, 27`), `core/validation.py` cluster 4 issues / blast
+radius 14.**
+
+One difference from the captured snapshot: a third cluster, `models/product.py` × 2. That is a
+**restoration, not a regression** — PLAN.md's own record of the correct state (line ~1623) is
+"3 clusters: `core/validation.py` × 4 / blast 14, `models/product.py` × 2, `services/upload.py`
+× 2". The snapshot had been taken after task 2's dedupe repair, which deleted that cluster along
+with the duplicate members and never re-clustered it. The new interrupted-batch sweep fixed it.

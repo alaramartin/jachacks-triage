@@ -373,15 +373,22 @@ issues. `comment_velocity` isn't a GitHub field - it's derived as comments
 per day-since-created (min 1 day denominator) so a fresh flood of comments
 reads as "hot" the same way engagement genuinely would.
 
-`limit` (0 = no cap) exists because every ingested issue costs three local
-LLM calls: pointing Triage at a repo with 400 open issues would take an hour.
-When capped we ask GitHub for the most recently *updated* issues, so a big
-repo shows its live queue rather than whatever was filed in 2014."""
+`limit` (0 = no cap) exists because every ingested issue costs local LLM
+calls: pointing Triage at a repo with 400 open issues takes a long time.
+Issues always come back most-recently-updated first, so whether or not a run
+is capped, the queue fills with what is actually live rather than with
+whatever was filed in 2014."""
 def fetch_open_issues(
     full_name: str, limit: int = 0, token: str = ""
 ) -> list[RemoteIssue] {
     out: list[RemoteIssue] = [];
     page: int = 1;
+    # Ingest ORDER is not cosmetic: it decides the order issues appear in
+    # Agent 3's clustering prompt, and on borderline pairs that flips the
+    # gate's judgment. Sorting an uncapped run newest-first (nicer to watch
+    # fill) measurably changed which of two 2-issue clusters formed on the seed
+    # repo, so it stays created-ascending. Capped runs still take the most
+    # recently updated, which is the whole point of a cap.
     order: str = "created&direction=asc" if limit <= 0 else "updated&direction=desc";
     while page <= 10 {
         rows: list[dict] | None = _api_get_list(

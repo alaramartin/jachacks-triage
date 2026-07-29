@@ -419,6 +419,21 @@ def:pub QueueScreen -> JsxElement {
     # rather than rendering a page with nothing on it. `open_issue_count` is
     # GitHub's real count (PRs excluded) as of the last select/ingest; -1 means
     # we have never checked, which is its own honest answer.
+    # A long background ingest has to READ as progress, not as a hang: it runs
+    # at a few seconds per issue and a big repo takes a while. open_issue_count
+    # is GitHub's real count, stored on the Repo at select time.
+    known_total = queue["open_issue_count"] as int;
+    progress_label = f"Triaging in the background - {str(issue_total)} issues placed so far, this list refreshes as they land.";
+    if known_total > 0 and issue_total >= 0 {
+        remaining = known_total - issue_total;
+        if remaining > 0 {
+            eta_min = max(1, round(remaining * 5 / 60));
+            progress_label = f"Triaging in the background - {str(issue_total)} of {str(known_total)} placed, about {str(eta_min)} min left. This list refreshes as they land.";
+        } else {
+            progress_label = f"Triaging in the background - {str(issue_total)} of {str(known_total)} placed.";
+        }
+    }
+
     total_rows = len(all_clusters) + len(all_standalone);
     known_open = queue["open_issue_count"] as int;
     empty_message = "";
@@ -454,9 +469,7 @@ def:pub QueueScreen -> JsxElement {
                     </p>
                     {ingesting
                     and <p className="mt-2 text-sm text-[var(--color-green)]">
-                        Triaging the rest of the queue in the background - {str(
-                            issue_total
-                        )} issues placed so far, this list refreshes as they land.
+                        {progress_label}
                     </p>}
                 </div>
                 <div className="shrink-0 pt-1">

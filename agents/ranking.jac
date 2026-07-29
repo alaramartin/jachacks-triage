@@ -46,8 +46,22 @@ one direct call `ingest_issue` (Person 2) makes right after creating the
 `resolves_to` edge - everything downstream still re-reads graph state fresh
 (blast radius re-walks `imports`, clustering re-reads ALL current
 `resolves_to` edges on the file) rather than being handed values directly."""
-def on_issue_resolved(issue: Issue, target: File, repo: Repo) -> None {
+def on_issue_resolved(
+    issue: Issue, target: File, repo: Repo, defer_clustering: bool = False
+) -> None {
     maybe_compute_blast_radius(target);
+
+    # Batch ingestion defers the clustering half. maybe_cluster() re-reads ALL
+    # issues on the file and overwrites every cluster field, so when N issues
+    # land on one file the first N-1 calls are pure discarded work - only the
+    # last one determines the final state. At ~7.8s each that was the single
+    # biggest waste in ingestion. The caller drains the deferred targets
+    # through cluster_and_rank() below, which produces the identical result.
+    if defer_clustering {
+        rank_issue(issue, target, repo);
+        return;
+    }
+
     cluster: Cluster | None = maybe_cluster(target);
 
     if cluster is not None {
@@ -58,6 +72,23 @@ def on_issue_resolved(issue: Issue, target: File, repo: Repo) -> None {
         }
     } else {
         rank_issue(issue, target, repo);
+    }
+}
+
+"""Drain point for deferred clustering - runs Agent 3 + Agent 4 once for a File
+that accumulated new `resolves_to` edges during a batch. Exactly what the tail
+of on_issue_resolved does, just called once per file instead of once per issue."""
+def cluster_and_rank(target: File, repo: Repo) -> None {
+    cluster: Cluster | None = maybe_cluster(target);
+    members: list[Issue] = [target<-:resolves_to:<-];
+    if len(members) == 0 {
+        return;
+    }
+    if cluster is not None {
+        rank_cluster(cluster, members, repo);
+    }
+    for m in members {
+        rank_issue(m, target, repo);
     }
 }
 

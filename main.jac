@@ -11,6 +11,7 @@ import from graph.nodes {
     PullRequest,
     Unresolved,
     Settings,
+    AssessmentCache,
     owns,
     resolves_to,
     parked,
@@ -21,9 +22,10 @@ import from graph.nodes {
 import from integrations.ast_parser { build_code_substrate, count_import_edges }
 import from integrations.js_parser { discover_js_files }
 import from agents.blast_radius { compute_blast_radius, build_dependency_graph }
-import from agents.triage_agent { resolve_issue, assess_severity, estimate_diff_size }
+import from agents.triage_agent { triage_issue, TriagedIssue }
 import from agents.ranking {
     on_issue_resolved,
+    cluster_and_rank,
     weighted_urgency,
     weighted_cluster_urgency
 }
@@ -31,10 +33,14 @@ import from agents.pr_agent {
     build_pr_for_cluster,
     build_pr_for_issue,
     preview_issue_fix,
-    IssueFixPreview
+    IssueFixPreview,
+    _warm_model,
+    FIX_MODEL
 }
 import os;
 import time;
+import json;
+import hashlib;
 import from integrations.github {
     fetch_open_issues,
     RemoteIssue,
@@ -144,12 +150,99 @@ glob DEMO_VIDEO_URL: str = os.environ.get("TRIAGE_DEMO_VIDEO_URL", "");
 # abandoned. Generous: a big repo legitimately takes an hour at ~9s/issue.
 glob INGEST_LOCK_TIMEOUT: float = 3600.0;
 
+# How often a batch ingest runs deferred clustering. Small enough that clusters
+# show up in the live queue while a long run is still going, large enough that
+# the N-1 redundant re-clusterings per file are collapsed away.
+glob CLUSTER_DRAIN_EVERY: int = 10;
+
+# ============================== Assessment cache ==============================
+# Agent 1's verdict is deterministic for the same issue text, repo and model, so
+# re-triaging the same issue should not pay for the LLM twice. Bump
+# PROMPT_VERSION whenever a semstring or the resolution logic changes, or the
+# cache will serve answers the current prompts would not produce.
+glob PROMPT_VERSION: str = "2026-07-29b";
+glob ASSESSMENT_CACHE_MAX: int = 2000;
+
+def _cache_node() -> AssessmentCache {
+    for n in [root-->][?:AssessmentCache] {
+        if isinstance(n, AssessmentCache) {
+            return n;
+        }
+    }
+    return root ++> AssessmentCache();
+}
+
+"""Cache key for one issue's assessment. Includes the repo and its file count
+because resolution depends on which files exist, and the model + prompt version
+because a different prompt is a different question."""
+def _assessment_key(repo: Repo, title: str, body: str) -> str {
+    raw: str = "\0".join(
+        [
+            PROMPT_VERSION,
+            FIX_MODEL,
+            repo.full_name,
+            str(repo.file_count),
+            title,
+            body
+        ]
+    );
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest();
+}
+
+def _cached_assessment(key: str) -> TriagedIssue | None {
+    cache: AssessmentCache = _cache_node();
+    if key not in cache.entries {
+        cache.misses += 1;
+        return None;
+    }
+    try {
+        row: dict = json.loads(cache.entries[key]);
+    } except Exception {
+        return None;
+    }
+    cache.hits += 1;
+    return TriagedIssue(
+        path=row["path"],
+        confidence=row["confidence"],
+        method=row["method"],
+        severity=row["severity"],
+        estimated_diff_lines=row["estimated_diff_lines"]
+    );
+}
+
+def _store_assessment(key: str, result: TriagedIssue) -> None {
+    cache: AssessmentCache = _cache_node();
+    cache.entries[key] = json.dumps(
+        {
+            "path": result.path,
+            "confidence": result.confidence,
+            "method": result.method,
+            "severity": result.severity,
+            "estimated_diff_lines": result.estimated_diff_lines
+        }
+    );
+    if key in cache.order {
+        cache.order.remove(key);
+    }
+    cache.order.append(key);
+    while len(cache.order) > ASSESSMENT_CACHE_MAX {
+        oldest: str = cache.order.pop(0);
+        if oldest in cache.entries {
+            del cache.entries[oldest];
+        }
+    }
+}
+
 # When this server process started. An ingest lock can only ever be held by a
 # run inside THIS process, so any lock predating startup is by definition dead
 # - the process was killed or restarted mid-run and its `finally` never ran.
 # Without this, a routine Ctrl-C during ingestion locks that repo out for a
 # full hour, which is not an acceptable dev-loop failure mode.
 glob PROCESS_STARTED_AT: float = time.time();
+
+# Pay the cold-start model load once, in the background, at boot rather than on
+# whichever request happens to be first. See pr_agent._warm_model.
+glob _WARMUP: None = _warm_model();
 glob SHOWCASE_MESSAGE: str = "This is the hosted showcase build - triage runs on a local model, so indexing, "
      "clustering and PR generation are disabled here. Watch the demo video instead.";
 
@@ -614,6 +707,34 @@ def _existing_issue(repo: Repo, external_id: str) -> Issue | None {
     return None;
 }
 
+"""Run Agent 3 + Agent 4 over every File that accumulated new issues, then
+clear the set. Idempotent - maybe_cluster re-evaluates from all current members
+every time, so an extra drain is harmless.
+
+`sweep` additionally picks up any file with 2+ resolved issues and no Cluster.
+Deferring clustering means an interrupted batch can leave issues resolved but
+unclustered, and a later re-ingest SKIPS those issues as duplicates - so nothing
+would ever mark them dirty and the clusters would never appear. Only the final
+drain sweeps: a file whose issues legitimately refused to cluster (the §4.5
+over-clustering guard) has no Cluster either, and re-judging it on every
+periodic drain would be pure waste."""
+def _drain_clusters(dirty: list[File], repo: Repo, sweep: bool = False) -> None {
+    targets: list[File] = [t for t in dirty];
+    if sweep {
+        for f in [repo->:owns:->][?:File] {
+            if len([f<-:resolves_to:<-]) >= 2
+            and len([f<-:cluster_targets:<-]) == 0
+            and f not in targets {
+                targets.append(f);
+            }
+        }
+    }
+    for target in targets {
+        cluster_and_rank(target, repo);
+    }
+    dirty.clear();
+}
+
 def _ingest_one(
     repo: Repo,
     external_id: str,
@@ -621,7 +742,8 @@ def _ingest_one(
     body: str,
     created_at: str,
     reactions: int,
-    comment_velocity: float
+    comment_velocity: float,
+    dirty: list[File] | None = None
 ) -> dict {
     duplicate: Issue | None = _existing_issue(repo, external_id);
     if duplicate is not None {
@@ -637,9 +759,20 @@ def _ingest_one(
     files: list[File] = [repo->:owns:->][?:File];
     file_paths: list[str] = [f.path for f in files];
 
-    resolution = resolve_issue(title, body, file_paths, repo_root=repo.repo_path);
-    severity: int = assess_severity(title, body);
-    diff_lines: int = estimate_diff_size(title, body);
+    # One LLM round trip when an explicit signal placed the issue, one when the
+    # model has to place it. Used to be three or four - see triage_issue. And
+    # zero when this exact issue text has been triaged before (reset_demo +
+    # re-ingest, or a re-index), which is what makes rehearsal instant.
+    cache_key: str = _assessment_key(repo, title, body);
+    cached: TriagedIssue | None = _cached_assessment(cache_key);
+    resolution: TriagedIssue = cached
+        if cached is not None
+        else triage_issue(title, body, file_paths, repo_root=repo.repo_path);
+    if cached is None {
+        _store_assessment(cache_key, resolution);
+    }
+    severity: int = resolution.severity;
+    diff_lines: int = resolution.estimated_diff_lines;
 
     issue: Issue = Issue(
         external_id=external_id,
@@ -686,7 +819,15 @@ def _ingest_one(
     # triggered the same way CLAUDE.md #5 describes: writing the resolves_to
     # edge, then downstream agents re-read graph state fresh rather than
     # being handed values directly.
-    on_issue_resolved(issue, target, repo);
+    #
+    # In a batch (`dirty` supplied) the clustering half is deferred and the
+    # target recorded instead - the caller drains it, which collapses N-1
+    # redundant re-clusterings per file. Single-issue ingest passes no `dirty`
+    # and still fires the whole cascade immediately.
+    on_issue_resolved(issue, target, repo, defer_clustering=dirty is not None);
+    if dirty is not None and target not in dirty {
+        dirty.append(target);
+    }
 
     clustered_into: str | None = None;
     issue_clusters: list[Cluster] = [issue->:grouped_in:->];
@@ -795,6 +936,10 @@ walker:pub ingest_from_github {
         results: list[dict] = [];
         skipped: int = 0;
         remote_issues: list[RemoteIssue] = [];
+        # Files that gained a resolves_to edge and still need Agent 3 run over
+        # them. Drained every CLUSTER_DRAIN_EVERY issues rather than only at the
+        # end, so clusters still appear in the live queue during a long run.
+        dirty: list[File] = [];
         try {
             remote_issues = fetch_open_issues(
                 target_full_name, self.limit, _session_token()
@@ -807,7 +952,8 @@ walker:pub ingest_from_github {
                     ri.body,
                     ri.created_at,
                     ri.reactions,
-                    ri.comment_velocity
+                    ri.comment_velocity,
+                    dirty
                 );
                 # _ingest_one re-checks per issue and reports rather than
                 # writing when the issue is already here, so the skip count
@@ -817,8 +963,14 @@ walker:pub ingest_from_github {
                 } else {
                     results.append(outcome);
                 }
+                if len(results) > 0 and len(results) % CLUSTER_DRAIN_EVERY == 0 {
+                    _drain_clusters(dirty, repo);
+                }
             }
         } finally {
+            # Drain before releasing the lock, including on a mid-run failure -
+            # otherwise a crashed run leaves issues resolved but unclustered.
+            _drain_clusters(dirty, repo, sweep=True);
             # Always release, including on a mid-run failure - a stuck lock
             # would make the repo permanently un-ingestable until it aged out.
             repo.ingesting_since = 0.0;

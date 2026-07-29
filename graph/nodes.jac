@@ -97,6 +97,19 @@ node Unresolved {  # exactly ONE of these per Repo. The parking lot.
     has count: int = 0;
 }
 
+# One root-attached cache of Agent 1's per-issue LLM verdicts, keyed by a hash
+# of the issue text + repo + model + prompt version. Triaging one issue costs
+# one or two local LLM calls at ~1.2-4.6s each, and that work is deterministic
+# for the same inputs - so a reset_demo + re-ingest (every rehearsal), or
+# re-indexing a repo, should not pay for it twice. Bounded LRU: `order` is
+# oldest-first and trimmed to ASSESSMENT_CACHE_MAX in main.jac.
+node AssessmentCache {
+    has entries: dict[str, str] = {};  # key -> JSON-encoded TriagedIssue
+    has order: list[str] = [];
+    has hits: int = 0;
+    has misses: int = 0;
+}
+
 node Settings {  # (reach) one per Repo - weighted ranking, PLAN.md Phase C
     has w_blast: float = 6.0;
     has w_sev: float = 3.0;
