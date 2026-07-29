@@ -324,13 +324,23 @@ walker:pub list_my_repos {
         indexed: set[str] = {r.full_name for r in _all_repos()};
         rows: list[dict] = [];
         for r in list_repos(token) {
+            # `r.open_issues` is GitHub's open_issues_count, which counts PULL
+            # REQUESTS as well as issues - a repo with one open PR and no
+            # issues reads as "1", which is exactly the confusion this fixes.
+            # The real count costs an extra paginated call, so it is only paid
+            # when the cheap number is non-zero: issues + PRs == 0 means there
+            # are provably no issues, and most repos are in that state.
+            real_issues: int = 0;
+            if r.open_issues > 0 {
+                real_issues = count_open_issues(r.full_name, token);
+            }
             rows.append(
                 {
                     "full_name": r.full_name,
                     "description": r.description,
                     "language": r.language,
                     "stars": r.stars,
-                    "open_issues": r.open_issues,
+                    "open_issues": real_issues,
                     "private": r.private,
                     "can_push": r.can_push,
                     "default_branch": r.default_branch,
@@ -398,23 +408,35 @@ walker:pub select_repo {
         already_indexed: list[File] = [repo->:owns:->][?:File];
         files_indexed: int = 0;
         import_edges: int = 0;
+        python_files: int = 0;
+        js_files: int = 0;
         if len(already_indexed) > 0 {
             files_indexed = repo.file_count;
             import_edges = count_import_edges(already_indexed);
+            python_files = len([f for f in already_indexed if f.language == "python"]);
+            js_files = files_indexed - python_files;
         } else {
             stats: dict[str, int] = build_code_substrate(cloned.path, repo);
             files_indexed = stats["files_indexed"];
             import_edges = stats["import_edges"];
+            python_files = stats["python_files"];
+            js_files = stats["js_files"];
         }
 
         # Two things the UI needs to be honest about a repo that isn't yours:
-        # a Python-only tool indexing a repo with no Python is an empty queue
-        # with no explanation, and a repo you can't push to means PRs will be
-        # opened from a fork (integrations/github.jac's create_pull_request).
+        # a repo in a language we can't parse is an empty queue with no
+        # explanation, and a repo you can't push to means PRs will be opened
+        # from a fork (integrations/github.jac's create_pull_request).
         warning: str = "";
         if files_indexed == 0 {
-            warning = f"{info.full_name} has no Python files to index - Triage only reads Python, so there's no code graph to rank against.";
+            warning = f"{info.full_name} has no Python, TypeScript or JavaScript files to index - those are the languages Triage can build a code graph from, so there's nothing to rank against.";
         }
+
+        # The real issue count, NOT RepoSummary.open_issues - that field
+        # includes pull requests and would overstate the queue. Cached onto the
+        # Repo so get_queue can explain an empty queue without an API call.
+        open_issues: int = count_open_issues(info.full_name, token);
+        repo.open_issue_count = open_issues;
 
         report {
             "ok": True,
@@ -423,11 +445,11 @@ walker:pub select_repo {
             "description": info.description,
             "files_indexed": files_indexed,
             "import_edges": import_edges,
-            # The real issue count, NOT RepoSummary.open_issues - that field
-            # includes pull requests and would overstate the queue.
-            "open_issues": count_open_issues(info.full_name, token),
+            "open_issues": open_issues,
             "issues_in_graph": len([repo->:owns:->][?:Issue]),
             "can_push": info.can_push,
+            "python_files": python_files,
+            "js_files": js_files,
             "warning": warning
         };
     }
@@ -706,6 +728,13 @@ walker:pub ingest_from_github {
             );
         }
 
+        # An uncapped run just enumerated the repo's entire open-issue list, so
+        # it is the freshest count we will ever have. A capped run saw only a
+        # slice and must not overwrite it.
+        if self.limit <= 0 {
+            repo.open_issue_count = len(remote_issues);
+        }
+
         report {
             "ok": True,
             "repo": target_full_name,
@@ -941,6 +970,10 @@ obj QueueResponse {
     has clusters: list[ClusterView];
     has singletons: list[SingletonView];
     has unresolved: list[UnresolvedView];
+    # GitHub's real open-issue count as of the last select/ingest, or -1 if
+    # never checked. Lets the UI say WHY a queue is empty - no issues exist vs
+    # issues exist but none have been triaged - instead of rendering nothing.
+    has open_issue_count: int = -1;
 }
 
 walker:pub get_queue {
@@ -955,7 +988,8 @@ walker:pub get_queue {
                 file_count=0,
                 clusters=[],
                 singletons=[],
-                unresolved=[]
+                unresolved=[],
+                open_issue_count=-1
             );
             disengage;
         }
@@ -1083,7 +1117,8 @@ walker:pub get_queue {
             file_count=repo.file_count,
             clusters=cluster_views,
             singletons=singleton_views,
-            unresolved=unresolved_views
+            unresolved=unresolved_views,
+            open_issue_count=repo.open_issue_count
         );
     }
 }

@@ -28,6 +28,12 @@ node Repo {
     # Read by triage/clustering/pr_agent to load real source off disk instead
     # of each hardcoding the "seed/repo" demo convention.
     has repo_path: str = "";
+    # GitHub's real open-ISSUE count (pull requests excluded) as of the last
+    # select_repo/ingest. -1 = never checked. Stored so get_queue can tell an
+    # empty queue apart from an un-ingested one WITHOUT hitting the GitHub API
+    # on every read - "this repo has no issues" and "this repo has 40 issues
+    # nobody triaged yet" look identical otherwise.
+    has open_issue_count: int = -1;
 }
 
 node File {

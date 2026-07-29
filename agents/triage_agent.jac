@@ -51,6 +51,54 @@ def _defines_symbol(symbol: str, p: str, repo_root: str) -> bool {
 # knowing which file DEFINES that symbol beats every filename heuristic.
 glob _DEF_INDEX: dict[str, dict[str, list[str]]] = {};
 
+# What a top-level declaration looks like, per language. `(?m)` is inline
+# rather than a `flags=` argument - Jac's typeshed has no 3-arg re.findall
+# overload.
+glob _PY_DECL: list[str] = [
+         r"(?m)^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+     ];
+glob _JS_DECL: list[str] = [
+         r"(?m)^[ \t]*(?:export[ \t]+)?(?:default[ \t]+)?(?:async[ \t]+)?function[ \t*]+([A-Za-z_$][A-Za-z0-9_$]*)",
+         r"(?m)^[ \t]*(?:export[ \t]+)?(?:default[ \t]+)?(?:abstract[ \t]+)?class[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)",
+         # `const Foo = () => {}` is how most of a modern TS codebase declares
+         # its components and helpers - without this the index misses them all.
+         r"(?m)^[ \t]*(?:export[ \t]+)?(?:const|let|var)[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)",
+         r"(?m)^[ \t]*(?:export[ \t]+)?(?:interface|type|enum)[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)"
+     ];
+glob _JS_SUFFIXES: list[str] = [
+         ".ts",
+         ".tsx",
+         ".mts",
+         ".cts",
+         ".js",
+         ".jsx",
+         ".mjs",
+         ".cjs"
+     ];
+
+"""A file's bare name with its source extension removed - `core/validation.py`
+-> `validation`, `app/ui/fonts.ts` -> `fonts`. What a report means when it
+mentions a module by name."""
+def _stem(path: str) -> str {
+    name: str = path.split("/")[-1];
+    for ext in [".py"] + _JS_SUFFIXES {
+        if name.lower().endswith(ext) {
+            return name[:-len(ext)];
+        }
+    }
+    return name;
+}
+
+def _decl_patterns(path: str) -> list[str] {
+    lowered: str = path.lower();
+    for ext in _JS_SUFFIXES {
+        if lowered.endswith(ext) {
+            return _JS_DECL;
+        }
+    }
+    return _PY_DECL;
+}
+
 def _definition_index(repo_root: str, file_paths: list[str]) -> dict[str, list[str]] {
     if repo_root in _DEF_INDEX {
         return _DEF_INDEX[repo_root];
@@ -61,16 +109,15 @@ def _definition_index(repo_root: str, file_paths: list[str]) -> dict[str, list[s
         if not source {
             continue;
         }
-        # `(?m)` inline rather than a `flags=` argument - Jac's typeshed has no
-        # 3-arg overload for re.findall.
-        for name in re.findall(
-            r"(?m)^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_][A-Za-z0-9_]*)",
-            source
-        ) {
-            if name not in index {
-                index[name] = [];
+        for pattern in _decl_patterns(p) {
+            for name in re.findall(pattern, source) {
+                if name not in index {
+                    index[name] = [];
+                }
+                if p not in index[name] {
+                    index[name].append(p);
+                }
             }
-            index[name].append(p);
         }
     }
     _DEF_INDEX[repo_root] = index;
@@ -193,7 +240,7 @@ def _path_score(path: str, issue_tokens: set[str], body_lower: str) -> float {
     if path.lower() in body_lower {
         score += 20.0;
     }
-    stem: str = path.split("/")[-1].replace(".py", "").lower();
+    stem: str = _stem(path).lower();
     if len(stem) > 3 and stem in issue_tokens {
         score += 5.0;
     }
@@ -264,6 +311,15 @@ def shortlist_candidates(
 
 def explicit_resolve(body: str, file_paths: list[str], repo_root: str | None = None) -> str | None {
     traceback_matches = re.findall(r'File "([^"]+\.py)", line \d+', body);
+    if not traceback_matches {
+        # A V8/Node stack trace is the JS equivalent of a Python traceback and
+        # just as strong a signal: `at handler (/app/src/api/route.ts:12:5)`,
+        # or the bare `src/api/route.ts:12:5` webpack/vite prints. Same
+        # ordering convention - innermost frame last.
+        traceback_matches = re.findall(
+            r'((?:[\w.\-/\\@]+)\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)):\d+(?::\d+)?', body
+        );
+    }
     if traceback_matches {
         # Python tracebacks list frames oldest-first; the LAST frame is where the
         # exception actually raised, so scan in reverse to find the real culprit
@@ -288,7 +344,7 @@ def explicit_resolve(body: str, file_paths: list[str], repo_root: str | None = N
         cleaned = sym.strip("`@");
         first_segment = cleaned.split(".")[0];
         for p in file_paths {
-            base = p.split("/")[-1].replace(".py", "");
+            base = _stem(p);
             # Matches a bare filename/module reference (`validation`) or the
             # leading segment of a dotted attribute access (`product.price_cents`
             # -> "product" -> models/product.py).

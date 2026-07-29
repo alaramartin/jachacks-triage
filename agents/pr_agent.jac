@@ -72,7 +72,7 @@ obj GeneratedFix {
     has new_content: str;
 }
 
-sem GeneratedFix = "A complete, corrected replacement for a single Python source file.";
+sem GeneratedFix = "A complete, corrected replacement for a single source file, in the same language as the source it was given.";
 sem GeneratedFix.new_content = "The FULL new file content (not a diff/patch) - every line of the file, with the described root cause fixed. Preserve everything about the file that isn't part of the bug: same imports, same unrelated functions, same style. Change only what's needed to fix the root cause described.";
 
 def generate_fix(
@@ -84,13 +84,13 @@ def generate_fix(
     retry_hint: str
 ) -> GeneratedFix by fix_llm(temperature=0.0, max_tokens=4000);
 
-sem generate_fix = "Given a Python file's current source and a diagnosed root cause shared by several bug reports, produce a corrected full replacement for that file. Make the smallest change that fixes the root cause for all the listed reports - do not refactor, rename, or reformat unrelated code, and do not remove functionality. If the root cause spans two nearby functions in the same file (e.g. a shared type/bounds-discipline problem), fix both as part of one coherent change. The output MUST be syntactically valid, complete Python - every string/docstring quote must be properly opened AND closed (never leave a triple-quote as a stray double-quote), every block properly indented, nothing truncated.";
-sem generate_fix.target_path = "Repo-relative path of the file being fixed, e.g. 'core/validation.py'.";
+sem generate_fix = "Given a source file's current contents and a diagnosed root cause shared by several bug reports, produce a corrected full replacement for that file. Write it in the SAME language as the source you were given - infer it from the file extension and the code itself, and never translate the file into another language. Make the smallest change that fixes the root cause for all the listed reports - do not refactor, rename, or reformat unrelated code, and do not remove functionality. If the root cause spans two nearby functions in the same file (e.g. a shared type/bounds-discipline problem), fix both as part of one coherent change. The output MUST be syntactically valid and complete in that language - every string/docstring quote properly opened AND closed (never leave a triple-quote as a stray double-quote), every block and brace properly closed and indented, nothing truncated.";
+sem generate_fix.target_path = "Repo-relative path of the file being fixed, e.g. 'core/validation.py' or 'app/ui/fonts.ts'. Its extension tells you which language to write.";
 sem generate_fix.source_code = "The file's current, actual source code.";
 sem generate_fix.root_cause_summary = "1-3 sentences describing what's broken in this file and why the linked reports all trace back to it.";
 sem generate_fix.proposed_fix_summary = "One sentence describing the intended mechanical fix.";
 sem generate_fix.issue_summaries = "One string per linked bug report, formatted '<external_id>: <title> - <body>' - ground the fix in what these reports actually describe.";
-sem generate_fix.retry_hint = "Empty on the first attempt. On a retry, this holds the exact Python SyntaxError from the previous attempt - fix that specific mistake this time, most likely a malformed string/docstring quote.";
+sem generate_fix.retry_hint = "Empty on the first attempt. On a retry, this holds the exact syntax error from the previous attempt - fix that specific mistake this time, most likely a malformed string/docstring quote.";
 
 def _issue_summary(issue: Issue) -> str {
     return f"{issue.external_id}: {issue.title} - {issue.body}";
@@ -119,12 +119,22 @@ sem preview_issue_fix.target_path = "Repo-relative path of the file the issue re
 sem preview_issue_fix.title = "The bug report's title.";
 sem preview_issue_fix.body = "The bug report's full text.";
 
-"""Python-only repo (CLAUDE.md #2) - so a real syntax check via `compile()`
-is a cheap, exact gate. Returns "" if `content` is valid Python, else the
-compiler's error message. LLM-generated full-file rewrites occasionally
-mangle a docstring/quote even when the described fix is otherwise correct,
-so this MUST run before anything is pushed to GitHub."""
-def _python_syntax_error(content: str, path: str) -> str {
+"""A real syntax check via `compile()` is a cheap, exact gate for Python.
+Returns "" if `content` is valid Python, else the compiler's error message.
+LLM-generated full-file rewrites occasionally mangle a docstring/quote even
+when the described fix is otherwise correct, so this MUST run before anything
+is pushed to GitHub.
+
+Only meaningful for Python: `compile()` on a TypeScript file fails every time,
+which would burn all three retries and then push anyway. For a non-Python file
+this returns "" - unchecked, not "checked and fine". There is no TS/JS parser
+in the stdlib and requiring a node toolchain to open a PR isn't a trade worth
+making, so those rewrites lean on the model plus human review, which is what
+the "a human clicks the button" design already assumes."""
+def _syntax_error(content: str, path: str) -> str {
+    if not path.lower().endswith(".py") {
+        return "";
+    }
     try {
         compile(content, path, "exec");
         return "";
@@ -226,10 +236,10 @@ def _build_pr(
         fix = generate_fix(
             target.path, source, root_cause, proposed_fix, summaries, retry_hint
         );
-        syntax_error = _python_syntax_error(fix.new_content, target.path);
+        syntax_error = _syntax_error(fix.new_content, target.path);
         if syntax_error {
             repaired: str = _repair_module_docstring(fix.new_content);
-            syntax_error = _python_syntax_error(repaired, target.path);
+            syntax_error = _syntax_error(repaired, target.path);
             if not syntax_error {
                 fix.new_content = repaired;
             }

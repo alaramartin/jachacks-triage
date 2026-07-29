@@ -1,10 +1,16 @@
-"""Build the code substrate (File nodes + imports edges) from a Python repo.
-Owner: Person 1. Uses Python's `ast` module directly - Jac has all of PyPI."""
+"""Build the code substrate (File nodes + imports edges) from a repo.
+
+Owner: Person 1. Python is parsed with Python's own `ast` module (Jac has all
+of PyPI); TypeScript/JavaScript is handled by integrations/js_parser.jac. A
+repo containing both gets ONE graph with both families of File nodes in it -
+imports don't cross languages, so it is simply two disconnected components,
+and blast radius is computed correctly within each."""
 
 import ast;
 import os;
 
 import from graph.nodes { Repo, File, owns, imports }
+import from integrations.js_parser { discover_js_files, js_targets, js_language_of }
 
 # Directories that are never the project's own source. Cloned third-party
 # repos are full of these and indexing them would both wreck the blast-radius
@@ -167,45 +173,83 @@ def _resolved_targets(
     return targets;
 }
 
-"""Walk repo_path, create one File node per .py file plus `imports` edges
-between them (intra-repo only - stdlib/third-party imports are dropped
-because they never appear in module_map). Returns files_indexed / import_edges."""
+"""Walk repo_path, create one File node per indexable source file plus
+`imports` edges between them (intra-repo only - stdlib, third-party and npm
+imports are dropped because they never resolve to a file in this repo).
+
+Handles Python and TypeScript/JavaScript, in that order. Returns
+files_indexed / import_edges, plus a per-language breakdown so the caller can
+say what it actually found."""
 def build_code_substrate(repo_path: str, repo: Repo) -> dict[str, int] {
-    rel_paths: list[str] = _discover_python_files(repo_path);
-    module_map: dict[str, str] = build_module_map(repo_path, rel_paths);
+    py_paths: list[str] = _discover_python_files(repo_path);
+    js_paths: list[str] = discover_js_files(repo_path);
+    module_map: dict[str, str] = build_module_map(repo_path, py_paths);
+    js_path_set: set[str] = set(js_paths);
 
     file_nodes: dict[str, File] = {};
-    for rel in rel_paths {
+    for rel in py_paths {
         full_path: str = os.path.join(repo_path, rel);
         loc: int = len(_read_text(full_path).splitlines());
-        f: File = File(path=rel, loc=loc);
+        f: File = File(path=rel, loc=loc, language="python");
+        repo +>:owns:+> f;
+        file_nodes[rel] = f;
+    }
+    for rel in js_paths {
+        full_path: str = os.path.join(repo_path, rel);
+        loc: int = len(_read_text(full_path).splitlines());
+        f: File = File(path=rel, loc=loc, language=js_language_of(rel));
         repo +>:owns:+> f;
         file_nodes[rel] = f;
     }
 
     edge_count: int = 0;
     seen: set[tuple[str, str]] = set();
-    for rel in rel_paths {
+    for rel in py_paths {
         full_path: str = os.path.join(repo_path, rel);
-        targets: list[str] = _resolved_targets(full_path, rel, module_map);
-        for target_rel in targets {
-            if target_rel == rel {
-                continue;
+        for target_rel in _resolved_targets(full_path, rel, module_map) {
+            if _link(file_nodes, seen, rel, target_rel) {
+                edge_count += 1;
             }
-            pair: tuple[str, str] = (rel, target_rel);
-            if pair in seen {
-                continue;
+        }
+    }
+    for rel in js_paths {
+        full_path: str = os.path.join(repo_path, rel);
+        source: str = _read_text(full_path);
+        for target_rel in js_targets(source, rel, js_path_set) {
+            if _link(file_nodes, seen, rel, target_rel) {
+                edge_count += 1;
             }
-            seen.add(pair);
-            src: File = file_nodes[rel];
-            tgt: File = file_nodes[target_rel];
-            src +>:imports:+> tgt;
-            edge_count += 1;
         }
     }
 
-    repo.file_count = len(rel_paths);
-    return {"files_indexed": len(rel_paths), "import_edges": edge_count};
+    total: int = len(py_paths) + len(js_paths);
+    repo.file_count = total;
+    return {
+        "files_indexed": total,
+        "import_edges": edge_count,
+        "python_files": len(py_paths),
+        "js_files": len(js_paths)
+    };
+}
+
+"""Create one `imports` edge, skipping self-imports and duplicates. True if an
+edge was actually created."""
+def _link(
+    file_nodes: dict[str, File],
+    seen: set[tuple[str, str]],
+    rel: str,
+    target_rel: str
+) -> bool {
+    if target_rel == rel or target_rel not in file_nodes {
+        return False;
+    }
+    pair: tuple[str, str] = (rel, target_rel);
+    if pair in seen {
+        return False;
+    }
+    seen.add(pair);
+    file_nodes[rel] +>:imports:+> file_nodes[target_rel];
+    return True;
 }
 
 def count_import_edges(files: list[File]) -> int {

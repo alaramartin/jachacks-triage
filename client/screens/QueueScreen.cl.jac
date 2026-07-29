@@ -154,6 +154,7 @@ def:pub QueueScreen -> JsxElement {
             queue = {
                 "repo": resp.repo,
                 "file_count": resp.file_count,
+                "open_issue_count": resp.open_issue_count,
                 "clusters": [_cluster_to_dict(c) for c in resp.clusters],
                 "singletons": [_singleton_to_dict(s) for s in resp.singletons],
                 "unresolved": [_unresolved_to_dict(u) for u in resp.unresolved]
@@ -343,6 +344,23 @@ def:pub QueueScreen -> JsxElement {
     ];
     drafted_count = len(drafted_clusters) + len(drafted_issues);
 
+    # An empty queue is ambiguous on its own, so say which kind of empty it is
+    # rather than rendering a page with nothing on it. `open_issue_count` is
+    # GitHub's real count (PRs excluded) as of the last select/ingest; -1 means
+    # we have never checked, which is its own honest answer.
+    total_rows = len(all_clusters) + len(all_standalone);
+    known_open = queue["open_issue_count"] as int;
+    empty_message = "";
+    if total_rows == 0 and not ingesting {
+        if known_open == 0 {
+            empty_message = "This repository has no open issues. Nothing to triage - which is the good outcome.";
+        } elif known_open > 0 {
+            empty_message = f"This repository has {str(known_open)} open issues on GitHub, but none have been triaged into the graph yet. Re-open it from Your projects to start ingestion.";
+        } else {
+            empty_message = "No issues have been triaged into this repository's queue yet. Re-open it from Your projects to start ingestion.";
+        }
+    }
+
     return
         <div className="min-h-screen px-6 sm:px-12 py-10 max-w-6xl mx-auto">
             <div className="flex items-start justify-between gap-6">
@@ -423,6 +441,18 @@ def:pub QueueScreen -> JsxElement {
                     </button>
                 </div>
             }}
+            {empty_message
+            and <div
+                className="mt-10 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-6 py-10 text-center"
+            >
+                <p className="text-sm text-[var(--color-text)]">{empty_message}</p>
+                <button
+                    onClick={lambda (_e: MouseEvent) -> None { nav("/repos"); }}
+                    className="mt-4 text-xs text-[var(--color-text-muted)] underline underline-offset-2 transition-colors hover:text-[var(--color-orange)]"
+                >
+                    Pick another repository
+                </button>
+            </div>}
             <div className="mt-8 flex flex-col gap-3">
                 {for row in clusters {
                     cluster = row["cluster"] as dict;

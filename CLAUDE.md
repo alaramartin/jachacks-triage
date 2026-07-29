@@ -48,7 +48,11 @@ Also, at the end, **NOTHING SHOULD BE HARDCODED**, particularly for the website/
 - ❌ No auto-merge. Ever.
 - ❌ No "reject PR + type feedback + regenerate" loop. **Parked as reach.** Only if everything
   else is done and tested by 6:00 PM.
-- ❌ No support for multiple languages. Python only.
+- ~~❌ No support for multiple languages. Python only.~~ **Lifted 2026-07-28 (post-hackathon).**
+  Python (via `ast`) **and** TypeScript/JavaScript (via `integrations/js_parser.jac`) both build
+  the same `File` + `imports` substrate. Everything downstream is language-agnostic and was not
+  touched. Adding a third language means one new parser module and a branch in
+  `build_code_substrate` — nothing else.
 - ❌ No real-time GitHub webhook server. We simulate ingestion via a `walker:pub` endpoint
   (which is _also_ how the live demo beat works — see §8).
 - ❌ No embeddings, no vector DB, no separate similarity index. Clustering comes from the

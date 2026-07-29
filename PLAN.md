@@ -1786,3 +1786,55 @@ Deliberately last, per the ask. Sketch, to be firmed up when we get there:
 - **Parallelize** ingestion across issues (they're independent until the clustering step).
 - Skip re-clustering per issue: cluster once at the end of a batch instead of on every edge.
 
+
+## Task 1b — TypeScript / JavaScript indexing (2026-07-28)
+
+Prompted by `alaramartin/website` reporting "no Python files to index": 9 of the account's 15
+repos are TypeScript, so a Python-only Triage could not touch most of the user's own work.
+CLAUDE.md's "Python only" scope guard is lifted (see §2 there).
+
+- [x] **`integrations/js_parser.jac`** — discovery + import resolution for
+      `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`. Regex over the four specifier shapes
+      (`from '…'`, bare `import '…'`, `require('…')`, dynamic `import('…')`) rather than a real
+      parser: there is no TS parser in the stdlib and requiring a node toolchain to index a repo
+      is a worse trade. Resolution is exact — a specifier only becomes an edge if it resolves to
+      a file actually in the index, so the failure mode is a *missing* edge, never a fabricated
+      one. Handles relative paths, extension inference in tsc's own order, `/index.*` directory
+      imports, the TS-ESM `./foo.js` → `foo.ts` convention, and `@/` `~/` root aliases.
+      Skips `node_modules`, `dist`, `build`, `.next`, `coverage`, minified bundles and `.d.ts`.
+- [x] **`build_code_substrate` dispatches by language** and sets `File.language`. A mixed repo
+      gets ONE graph containing both families — imports don't cross languages, so it is two
+      disconnected components and blast radius is still correct within each.
+- [x] **`agents/triage_agent.jac`**: the definition index learned TS/JS declaration forms
+      (`function`, `class`, `const`/`let`/`var`, `interface`/`type`/`enum`, all with optional
+      `export`/`default`), `explicit_resolve` reads V8/Node stack traces the way it already read
+      Python tracebacks, and `_stem()` strips any source extension instead of only `.py`.
+- [x] **`agents/pr_agent.jac`**: `_python_syntax_error` → `_syntax_error`, which **skips
+      non-Python files**. `compile()` on a `.ts` file fails every time, which would have burned
+      all three retries and pushed anyway. Non-Python rewrites are explicitly unchecked rather
+      than falsely "validated". The `generate_fix` semstrings no longer say "Python" and now
+      tell the model to write in the source's own language and never translate it.
+- [x] `select_repo` reports `python_files` / `js_files`; the no-parseable-source warning names
+      all three supported languages.
+
+**Verified live:**
+
+| repo | result |
+| --- | --- |
+| `alaramartin/website` | 48 TS files, 79 import edges (was "0 files, no Python") |
+| `pmndrs/zustand` | 49 files / 44 edges; both open issues ingested — one resolved onto a real file via the LLM path, one honestly parked |
+| blast radius on TS | `src/vanilla.ts` reached by **24 of 49** files; `app/ui/fonts.ts` by **23 of 48** |
+
+### ⚠️ Known gap, folded into task 2
+
+`select_repo` short-circuits on `already_indexed` — a repo indexed **before** this change keeps
+its Python-only substrate and will never pick up its JS/TS files. Re-indexing in place is not
+safe to bolt on here because deleting `File` nodes orphans the `resolves_to` edges of any issue
+already resolved onto them. Task 2 is already doing graph maintenance (`dedupe_repos`,
+`dedupe_issues`), so a proper "re-index this repo, rebuilding its issue edges" belongs there.
+
+Also folded into task 2, found while diagnosing this: **duplicate `Repo` nodes** for
+`AzizAkturin/TeamSnorlax-UX-Agent` (two nodes, same root, same `full_name`). `select_repo` and
+`get_queue` each independently take `matches[0]`, so a read can land on the node that has no
+files yet — which is what produced the "indexed 0 files" report on a repo that has 19 Python
+files. `dedupe_repos` exists but nothing prevents the duplicate being created in the first place.

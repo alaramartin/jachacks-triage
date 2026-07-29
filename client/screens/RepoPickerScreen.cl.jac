@@ -2,7 +2,7 @@
 
 LIVE DATA: walker/list_my_repos returns every repo the logged-in account owns
 or collaborates on, straight from the GitHub API - nothing on this screen is
-fabricated. Picking one runs walker/select_repo (clone + AST index) then
+fabricated. Picking one runs walker/select_repo (clone + index the code graph) then
 walker/ingest_from_github (the Agent 1->2->3->4 cascade over its real open
 issues), reporting progress between the two because indexing is fast and
 triage is not. The whole queue gets triaged - no cap - because collapsing a
@@ -35,8 +35,8 @@ def:pub RepoPickerScreen -> JsxElement {
         custom_url: str = "",
         busy_repo: str = "",
         progress: str = "",
-        # select_repo's `warning` - the honest "this repo has no Python in it"
-        # message, rather than an empty queue with no explanation.
+        # select_repo's `warning` - the honest "there's nothing here Triage
+        # can parse" message, rather than an empty queue with no explanation.
         warning: str = "",
         showcase: bool = False,
         demo_video_url: str = "";
@@ -111,8 +111,8 @@ def:pub RepoPickerScreen -> JsxElement {
             return;
         }
 
-        # A repo with no Python in it indexes to an empty code graph. Say so
-        # here instead of navigating to a queue that can never fill.
+        # A repo in a language we can't parse indexes to an empty code graph.
+        # Say so here instead of navigating to a queue that can never fill.
         if picked["warning"] {
             warning = picked["warning"];
             busy_repo = "";
@@ -191,7 +191,7 @@ def:pub RepoPickerScreen -> JsxElement {
                 <input
                     value={custom_url}
                     onChange={lambda (e: ChangeEvent) -> None { custom_url = e.target.value; }}
-                    placeholder="Or paste any repo: github.com/pallets/flask"
+                    placeholder="Or paste any repo: github.com/vercel/next.js"
                     disabled={bool(busy_repo) or showcase}
                     className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-sm text-[var(--color-text)] placeholder:text-[#5b616e] focus:border-[var(--color-orange)] focus:outline-none disabled:opacity-40"
                 />
@@ -282,7 +282,9 @@ def:pub RepoPickerScreen -> JsxElement {
                                             else "bg-[#5b616e]"
                                     )}
                                 />
-                                {str(r["open_issues"]) + " issues + PRs"}
+                                {str(r["open_issues"]) + (
+                                    " issue" if r["open_issues"] == 1 else " issues"
+                                )}
                             </span>
                             {r["language"] and <span>{r["language"]}</span>}
                             {r["private"] and <span>private</span>}
