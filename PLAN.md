@@ -1628,3 +1628,161 @@ issue text, now sourced from GitHub instead of a fixture.
 **Data honesty update (CLAUDE.md §2):** the "Issue links are best-effort" caveat in the Data
 honesty section above is now stale — issue chips resolve to real GitHub links for every
 ingested issue, not just a hypothetical numeric-external_id case.
+
+---
+
+# Post-hackathon refinement pass (2026-07-28)
+
+Five asks, in the order they'll be done. Task 3 (speed) is deliberately last — it's the
+vaguest and the lowest priority. **Each task ends with a stop-and-test beat**: nothing moves
+on to the next task until the human has run it and committed.
+
+Everything below was diagnosed against the **live running server + the persisted graph**
+(`.jac/data/anchor_store.db`), not guessed.
+
+## Task 1 — Index ANY repo, not just your own
+
+### What's actually broken
+
+The paste box was deleted from the JSX in commit `0d2c12c` ("demo bugfixes"), with a comment
+claiming the server side is fine. The server side is **not** fine — three separate things
+break on somebody else's repo:
+
+1. **`llm_resolve` is handed EVERY file path + every file summary.** Fine for an 18-file seed
+   repo; on `pallets/flask` (~90 py files) it's marginal and on `jaseci-labs/jac` (1000+) the
+   prompt blows past a local 7B model's context and the call errors or returns garbage. This
+   is almost certainly the "it was erroring" the box got pulled for.
+2. **PR creation assumes push access.** `create_pull_request` does `POST /git/refs` directly
+   on the target repo. On a repo you don't own that's a hard `403` — which is the *normal*
+   case for "other people's open-source repos". There is no fork path.
+3. **No feedback for the cases that legitimately can't work** — a repo with zero Python files
+   indexes to `file_count = 0` and every issue silently parks as Unresolved with no
+   explanation on screen.
+
+### Fix
+
+- [ ] `agents/triage_agent.jac`: add `shortlist_candidates(title, body, file_paths,
+      summaries, cap)` — a cheap, deterministic lexical pre-filter (token overlap between the
+      issue text and each path + its docstring summary, plus every path literally mentioned in
+      the body). `resolve_issue` sends the LLM at most `cap` (default 40) candidates instead
+      of the whole repo. Pure Python, no extra LLM call, and it makes big repos *possible*,
+      not just faster.
+- [ ] `integrations/github.jac`: `ensure_fork(full_name, token)` (POST `/repos/{r}/forks`,
+      poll until the fork's default branch is readable) and rework `create_pull_request` to
+      take a `head_repo`: when the caller can't push to the target, create the branch on the
+      **fork**, write the file there, and open the PR cross-repo with `head = "<owner>:<branch>"`.
+      Push access is probed once via `GET /repos/{r}` → `permissions.push`.
+- [ ] `main.jac` / `select_repo`: report `python_files` explicitly and a `warning` string when
+      a repo indexes to 0 Python files, so the UI can say why instead of showing an empty queue.
+- [ ] `client/screens/RepoPickerScreen.cl.jac`: restore the "paste any repo" form (it's still
+      wired to `handle_custom_submit`), and surface the new warning + a "you can't push here,
+      PRs will open from a fork" note on the queue screen.
+
+**Test:** paste `pallets/flask` (or any public repo you don't own), confirm it indexes, the
+queue fills, and Generate PR opens a PR *from your fork* against upstream.
+
+## Task 2 — The two bugs
+
+### 2a. Duplicated issues — CONFIRMED, root cause found
+
+`get_queue` on `alaramartin/triage-demo` right now: `services/upload.py` reports **10** issues
+that are really 2 (#16 ×5, #17 ×5), and the standalone list carries 30 rows for 12 issues. The
+graph has **64 Issue nodes for 20 real GitHub issues** — 20 distinct `external_id`s with
+multiplicities of 1–5.
+
+The multiplicity *rises with issue number* (#8/#9 ×1 … #19/#20/#21 ×5). That's the signature of
+**overlapping `ingest_from_github` runs**, not of a bad loop: `ingest_from_github` snapshots
+`already = {external_ids}` **once, before the loop**, then spends ~9s per issue. Anything that
+starts a second run mid-flight (the picker's detached `start_ingest`, a browser retry of a
+multi-minute request, a re-click, a back-and-click-again) re-ingests everything the first run
+hasn't reached yet. Five overlapping runs ⇒ ×5 on the tail.
+
+- [ ] **Re-check inside the loop, not just before it.** Query the repo's issues by
+      `external_id` immediately before creating each `Issue` node.
+- [ ] **Take an ingest lock on the `Repo` node** (`ingesting_since: float`). A second
+      `ingest_from_github` for the same repo returns `{ok: false, error: "already ingesting"}`
+      instead of racing. Lock is released in a `try`/`finally` and treated as stale after 15 min
+      so a crashed run can't wedge the repo forever.
+- [ ] **Client guard**: the repo picker disables cards while a select/ingest is in flight
+      (it already has `busy_repo` — it just isn't held across the nav).
+- [ ] **`walker:pub dedupe_issues`** — repairs an already-polluted graph: for each repo, keep
+      the oldest Issue per `external_id`, delete the rest and their edges, then recompute
+      cluster `issue_count`. `dedupe_repos` already does the Repo-level equivalent.
+
+### 2b. Generate PR does nothing — CONFIRMED, root cause found
+
+`.env` line 34 is `TRIAGE_FIX_MODEL=` — **set but empty**. `agents/pr_agent.jac` does
+`os.environ.get("TRIAGE_FIX_MODEL", "ollama/qwen2.5-coder:7b")`, and `os.environ.get` returns
+the **empty string**, not the default, for a set-but-empty var. So `fix_llm = Model(model_name="")`
+and every `generate_fix` dies with:
+
+```
+litellm.BadRequestError: LLM Provider NOT provided ... You passed model=
+```
+
+Reproduced directly (scratch `jac run` against the real file, no GitHub calls). The walker then
+500s, the client's `root spawn` throws, `mark_generating(id, False)` never runs — hence
+"it says Generating and then nothing, forever". This broke in `dc7f1bb` (showcase mode), which
+added the empty var to `.env`.
+
+- [ ] **`_env(name, default)` helper** in `pr_agent.jac` + `github.jac` that treats
+      set-but-empty as unset. Same trap applies to `TRIAGE_APP_URL`, `TRIAGE_WORKSPACE`.
+- [ ] **`generate_pr` / `generate_pr_for_issue` must never 500.** Wrap the fix-generation call
+      so an LLM failure reports `{ok: false, error: "<reason>"}` and the UI shows it.
+- [ ] **Client `try`/`finally`** around both PR handlers so the spinner always clears.
+- [ ] Add a one-line startup check that prints the resolved fix model, so an empty/misconfigured
+      model is visible at boot instead of on click.
+
+**Test:** click Generate PR on the `core/validation.py` cluster. Expect a real PR, or a red
+banner naming the reason — never a stuck spinner.
+
+## Task 4 — Personalized ranking settings
+
+Half-built already: the `Settings` node, `set_weights`, and `weighted_urgency`
+(with `w_reactions` / `w_comment_velocity` terms) all exist and `get_queue` re-ranks against
+them. What's missing is that **the UI only exposes 3 of the 5 weights and never loads the
+stored ones** — `SettingsPanel` hardcodes `w_blast = 6.0` on every mount, so a saved
+preference silently reverts on reload.
+
+- [ ] `walker:pub get_weights` (or fold the weights into `get_queue`'s report) so the panel
+      mounts with what's actually stored.
+- [ ] Sliders for **social signals** (`w_reactions`, `w_comment_velocity`) — the two weights
+      that already work server-side and aren't on screen.
+- [ ] A "reset to structural defaults" button, and live per-slider explanation text so the
+      demo point ("blast radius is the signal only a graph gives you") survives someone
+      dragging the sliders around.
+- [ ] Keep `set_weights`' current contract: it never touches stored `Issue.urgency`, so the
+      cascade's numbers stay blast-dominant regardless of viewer preference.
+
+**Test:** move the sliders, reload the page, confirm the order and the slider positions both
+persist.
+
+## Task 5 — Better PR quality
+
+Current body is four short sections and a bare `- <id>: <title>` list. Target:
+
+- [ ] **Real issue links** — `Closes #16` / `Closes #17` lines (GitHub auto-closes on merge)
+      plus full URLs, using the fact that `external_id` IS the GitHub issue number.
+- [ ] **Before / after** — emit the unified diff (`difflib.unified_diff` over the old and new
+      file, already both in hand) into a collapsed ```` ```diff ```` block, so the PR shows what
+      changed rather than just asserting it.
+- [ ] **What it did and why, specifically** — a `by llm()` `FixExplanation` object
+      (`what_changed`, `why_it_works`, `risk_notes`, `test_suggestion`) generated from the
+      before/after pair, not from the issue text.
+- [ ] **Provenance** — the blast-radius line becomes a short table (target file, dependents
+      reached, files in repo, cluster urgency, member count) and the footer keeps the "a human
+      clicked this" line.
+- [ ] Verify the whole body renders on a real PR before calling it done.
+
+## Task 3 — Make triage faster (LAST)
+
+Deliberately last, per the ask. Sketch, to be firmed up when we get there:
+
+- **Cache the expensive per-issue LLM work** keyed by `(repo, external_id, content hash)` so
+  a re-visit or a re-ingest is instant. This is the "optimize repeated visits" half.
+- **Cut 3 LLM calls per issue to 1** by merging `assess_specificity` + `assess_severity` +
+  `estimate_diff_size` + `llm_resolve` into a single structured `by llm()` object. That's the
+  real win: ~9s → ~3s per issue.
+- **Parallelize** ingestion across issues (they're independent until the clustering step).
+- Skip re-clustering per issue: cluster once at the end of a batch instead of on every edge.
+

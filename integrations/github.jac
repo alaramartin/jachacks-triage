@@ -299,6 +299,10 @@ obj PullRequestResult {
     has pr_number: int = 0;
     has pr_url: str = "";
     has error: str = "";
+    # Where the branch actually landed. Equal to the target repo when the user
+    # can push to it; the user's fork otherwise (see create_pull_request).
+    has head_repo: str = "";
+    has forked: bool = False;
 }
 
 # An empty `token` falls back to .env's GITHUB_TOKEN; unauthenticated (both
@@ -460,6 +464,105 @@ def count_open_issues(full_name: str, token: str = "") -> int {
     return total;
 }
 
+# ============================== Fork-based contribution ==============================
+# The whole point of "index any open-source repo" is that you do NOT have push
+# access to it. Writing a branch straight onto `pallets/flask` is a hard 403,
+# which is what made any-repo mode look broken. So: probe push access, and when
+# it isn't there, do what a human contributor does - fork, branch on the fork,
+# and open a cross-repo PR.
+
+"""Whether the active token can push to `full_name`. False for anything the
+user doesn't own or collaborate on - and False, conservatively, if the repo
+can't be read at all."""
+def can_push_to(full_name: str, token: str = "") -> bool {
+    row: dict | None = _api_get(f"https://api.github.com/repos/{full_name}", token);
+    if row is None {
+        return False;
+    }
+    perms: dict = row.get("permissions") or {};
+    return bool(perms.get("push", False));
+}
+
+obj ForkResult {
+    has full_name: str = "";
+    has owner: str = "";
+    has default_branch: str = "main";
+    has error: str = "";
+}
+
+"""The authenticated user's fork of `full_name`, creating it if it doesn't
+exist yet. Forking is asynchronous on GitHub's side, so a fresh fork is polled
+until it's actually readable. An existing fork is fast-forwarded to upstream
+first (`merge-upstream`), best-effort - a stale fork would otherwise put
+unrelated commits in the PR's diff."""
+def ensure_fork(full_name: str, token: str = "") -> ForkResult {
+    active: str = token if token else GITHUB_TOKEN;
+    user: GithubUser = get_authenticated_user(active);
+    if user.error or not user.login {
+        return ForkResult(
+            error=user.error or "couldn't identify the logged-in GitHub user"
+        );
+    }
+
+    name: str = full_name.split("/")[-1];
+    candidate: str = f"{user.login}/{name}";
+    existing: dict | None = _api_get(
+        f"https://api.github.com/repos/{candidate}", active
+    );
+    if existing is not None {
+        parent: dict = existing.get("parent") or {};
+        if parent.get("full_name", "") == full_name {
+            branch: str = existing.get("default_branch", "main");
+            _merge_upstream(candidate, branch, active);
+            return ForkResult(
+                full_name=candidate, owner=user.login, default_branch=branch
+            );
+        }
+        # Same name, different project (a coincidence, or a rename). Forking
+        # anyway gets us GitHub's own de-duplicated name back in the response.
+    }
+
+    created: ApiSendResult = _api_send(
+        f"https://api.github.com/repos/{full_name}/forks", "POST", {}, active
+    );
+    if created.error or created.data is None {
+        return ForkResult(
+            error=created.error or f"GitHub wouldn't fork {full_name}"
+        );
+    }
+    fork_name: str = created.data.get("full_name", candidate);
+    fork_branch: str = created.data.get("default_branch", "main");
+    fork_owner: str = fork_name.split("/")[0];
+
+    # A brand-new fork isn't immediately usable - poll until its default branch
+    # resolves, rather than failing on a race we know about.
+    attempt: int = 0;
+    while attempt < 20 {
+        if _branch_head_sha(fork_name, fork_branch, active) is not None {
+            return ForkResult(
+                full_name=fork_name, owner=fork_owner, default_branch=fork_branch
+            );
+        }
+        time.sleep(1.5);
+        attempt += 1;
+    }
+    return ForkResult(
+        error=f"fork {fork_name} was created but GitHub hasn't made it available yet - try again in a moment"
+    );
+}
+
+"""Fast-forward a fork's `branch` to its upstream. Best-effort by design: a
+diverged or already-current fork just isn't updated, which is not a reason to
+abandon the PR."""
+def _merge_upstream(fork_full_name: str, branch: str, token: str = "") -> None {
+    _api_send(
+        f"https://api.github.com/repos/{fork_full_name}/merge-upstream",
+        "POST",
+        {"branch": branch},
+        token
+    );
+}
+
 """Base commit SHA for `branch` on `full_name`, or None if the branch/repo
 can't be read (bad token, wrong repo, network)."""
 def _branch_head_sha(full_name: str, branch: str, token: str = "") -> str | None {
@@ -496,7 +599,34 @@ def create_pull_request(
         );
     }
 
-    base_sha: str | None = _branch_head_sha(full_name, default_branch, active);
+    # Where the branch will live. Own repo => straight onto it. Somebody
+    # else's => onto our fork, exactly like a human contributor.
+    head_repo: str = full_name;
+    head_owner: str = "";
+    forked: bool = False;
+    if not can_push_to(full_name, active) {
+        fork: ForkResult = ensure_fork(full_name, active);
+        if fork.error {
+            return PullRequestResult(
+                ok=False,
+                error=f"no push access to {full_name} and forking it failed: {fork.error}"
+            );
+        }
+        head_repo = fork.full_name;
+        head_owner = fork.owner;
+        forked = True;
+    }
+
+    # Base the branch on the fork's own head (just fast-forwarded to upstream)
+    # so the ref definitely exists there; fall back to upstream's head, which
+    # is reachable from the fork since forks share an object store.
+    base_sha: str | None = None;
+    if forked {
+        base_sha = _branch_head_sha(head_repo, default_branch, active);
+    }
+    if base_sha is None {
+        base_sha = _branch_head_sha(full_name, default_branch, active);
+    }
     if base_sha is None {
         return PullRequestResult(
             ok=False,
@@ -506,7 +636,7 @@ def create_pull_request(
 
     branch_name: str = f"triage/fix-{int(time.time())}";
     ref_result: ApiSendResult = _api_send(
-        f"https://api.github.com/repos/{full_name}/git/refs",
+        f"https://api.github.com/repos/{head_repo}/git/refs",
         "POST",
         {"ref": f"refs/heads/{branch_name}", "sha": base_sha},
         active
@@ -517,7 +647,7 @@ def create_pull_request(
 
     if path and new_content {
         existing: dict | None = _api_get(
-            f"https://api.github.com/repos/{full_name}/contents/{path}?ref={branch_name}",
+            f"https://api.github.com/repos/{head_repo}/contents/{path}?ref={branch_name}",
             active
         );
         existing_sha: str | None = existing["sha"] if existing else None;
@@ -531,7 +661,7 @@ def create_pull_request(
             content_payload["sha"] = existing_sha;
         }
         put_result: ApiSendResult = _api_send(
-            f"https://api.github.com/repos/{full_name}/contents/{path}",
+            f"https://api.github.com/repos/{head_repo}/contents/{path}",
             "PUT",
             content_payload,
             active
@@ -541,18 +671,37 @@ def create_pull_request(
         }
     }
 
+    # Cross-repo PRs identify the source branch as "<fork owner>:<branch>".
+    head_ref: str = f"{head_owner}:{branch_name}" if forked else branch_name;
     pr_result: ApiSendResult = _api_send(
         f"https://api.github.com/repos/{full_name}/pulls",
         "POST",
-        {"title": title, "body": body, "head": branch_name, "base": default_branch},
+        {
+            "title": title,
+            "body": body,
+            "head": head_ref,
+            "base": default_branch,
+            # Lets the upstream maintainer push fixups onto our branch - the
+            # norm for an outside contribution, and it costs nothing.
+            "maintainer_can_modify": True
+        },
         active
     );
     if pr_result.error or pr_result.data is None {
         return PullRequestResult(
-            ok=False, error=pr_result.error or "GitHub returned no PR data"
+            ok=False,
+            error=pr_result.error or "GitHub returned no PR data",
+            head_repo=head_repo,
+            forked=forked
         );
     }
 
     pr: dict = pr_result.data;
-    return PullRequestResult(ok=True, pr_number=pr["number"], pr_url=pr["html_url"]);
+    return PullRequestResult(
+        ok=True,
+        pr_number=pr["number"],
+        pr_url=pr["html_url"],
+        head_repo=head_repo,
+        forked=forked
+    );
 }

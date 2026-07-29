@@ -26,10 +26,6 @@ sv import from ...main {
 glob SHOWCASE_TOOLTIP: str = "We were too broke to afford an API key - triage runs on a model on our own "
      "laptop, so this is disabled on the hosted build. Watch the demo video.";
 
-# The "paste any repo link" box is deliberately NOT rendered. The server side
-# of it is untouched - select_repo/parse_repo_full_name still accept an
-# arbitrary repo, and handle_custom_submit below still works - so putting the
-# control back is a JSX-only change.
 def:pub RepoPickerScreen -> JsxElement {
     has repos: list = [],
         loading: bool = True,
@@ -39,6 +35,9 @@ def:pub RepoPickerScreen -> JsxElement {
         custom_url: str = "",
         busy_repo: str = "",
         progress: str = "",
+        # select_repo's `warning` - the honest "this repo has no Python in it"
+        # message, rather than an empty queue with no explanation.
+        warning: str = "",
         showcase: bool = False,
         demo_video_url: str = "";
 
@@ -87,8 +86,14 @@ def:pub RepoPickerScreen -> JsxElement {
     }
 
     async def open_repo(repo_url: str) -> None {
+        # Guard: one select/ingest at a time. Two overlapping ingests is
+        # exactly how the graph ended up with five copies of the same issue.
+        if busy_repo {
+            return;
+        }
         busy_repo = repo_url;
         error = "";
+        warning = "";
         progress = "Cloning and indexing the code graph...";
 
         selected = root spawn select_repo(repo_url=repo_url);
@@ -101,6 +106,15 @@ def:pub RepoPickerScreen -> JsxElement {
         picked = selected.reports[0];
         if not picked["ok"] {
             error = picked["error"];
+            busy_repo = "";
+            progress = "";
+            return;
+        }
+
+        # A repo with no Python in it indexes to an empty code graph. Say so
+        # here instead of navigating to a queue that can never fill.
+        if picked["warning"] {
+            warning = picked["warning"];
             busy_repo = "";
             progress = "";
             return;
@@ -173,8 +187,30 @@ def:pub RepoPickerScreen -> JsxElement {
                     {progress}
                 </div>
             </div>}
+            <form onSubmit={handle_custom_submit} className="mt-6 flex gap-2">
+                <input
+                    value={custom_url}
+                    onChange={lambda (e: ChangeEvent) -> None { custom_url = e.target.value; }}
+                    placeholder="Or paste any repo: github.com/pallets/flask"
+                    disabled={bool(busy_repo) or showcase}
+                    className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-sm text-[var(--color-text)] placeholder:text-[#5b616e] focus:border-[var(--color-orange)] focus:outline-none disabled:opacity-40"
+                />
+                <button
+                    type="submit"
+                    disabled={bool(busy_repo) or showcase}
+                    title={SHOWCASE_TOOLTIP if showcase else ""}
+                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-2.5 text-sm font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-orange)] disabled:opacity-40"
+                >
+                    Triage this repo
+                </button>
+            </form>
+            <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                Any public repo works, not just your own - Triage opens its PRs from a fork when you don't have push access.
+            </p>
             {error
             and <p className="mt-6 text-sm text-[var(--color-orange)]">{error}</p>}
+            {warning
+            and <p className="mt-6 text-sm text-[var(--color-orange)]">{warning}</p>}
             {showcase
             and <div
                 className="mt-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-sm text-[var(--color-text-muted)]"

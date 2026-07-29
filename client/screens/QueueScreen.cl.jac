@@ -6,7 +6,15 @@ order here IS the order get_queue returns, clusters/singletons already ranked by
 urgency descending.
 """
 
-import from "@jac/runtime" { useNavigate, useLocation }
+# __invalidateEndpoint is the jac client runtime's cache control. It is needed
+# here because the runtime caches every NON-writer walker response for 60s
+# (`defaultTtlMs`, client_runtime_core.js) keyed by walker + args - so a poll
+# calling get_queue with the same full_name just gets handed the first
+# response back, and the queue looked frozen until a hard reload dropped the
+# whole JS cache. The runtime only auto-invalidates when a WRITER runs in this
+# same tab; our background ingest writes on the server for minutes after its
+# one client call, so nothing ever clears it. See load_queue below.
+import from "@jac/runtime" { useNavigate, useLocation, __invalidateEndpoint }
 import from react { useEffect }
 sv import from ...main {
     get_queue,
@@ -115,6 +123,10 @@ def:pub QueueScreen -> JsxElement {
         ingesting: bool = False,
         issue_total: int = -1,
         stable_polls: int = 0,
+        # Bumped by every poll so the polling effect's dependency list always
+        # changes and it re-arms with fresh state - even on a failed refetch,
+        # which changes neither issue_total nor stable_polls.
+        poll_tick: int = 0,
         # id -> True while its walker is in flight, so the button can show a
         # spinner. Drafting a PR takes ten-plus seconds (real source read, a
         # full-file by llm() rewrite, then the GitHub call).
@@ -132,6 +144,10 @@ def:pub QueueScreen -> JsxElement {
             loading = False;
             return;
         }
+        # Always go to the server. Without this the 60s client-side response
+        # cache makes every poll a no-op and the "refreshes as they land"
+        # promise on screen is a lie.
+        __invalidateEndpoint("walker:get_queue");
         result = root spawn get_queue(full_name=full_name);
         if result.reports and len(result.reports) > 0 {
             resp = result.reports[0];
@@ -173,23 +189,36 @@ def:pub QueueScreen -> JsxElement {
 
     # Refetch every 5s while a background ingest is running, so issues appear
     # in the ranked queue as they are triaged instead of after a blank wait.
+    #
+    # A single-shot setTimeout that RE-ARMS itself through the dependency list,
+    # not a setInterval. A long-lived interval callback closes over the state
+    # values from the render that created it and never sees another one - the
+    # previous version's `stable_polls >= 3` stop condition read a permanently
+    # stale 0 and so could never fire, leaving the poll running forever. Here
+    # every poll bumps `poll_tick`, which is a dependency, so the effect tears
+    # down and re-runs with current state each time and the stop condition is
+    # evaluated against real values.
     useEffect(
         lambda {
             if not ingesting {
                 return lambda { None; };
             }
-            interval = setInterval(
-                lambda { if stable_polls >= 3 {
-                    ingesting = False;
-                    clearInterval(interval);
-                } else {
+            # Three consecutive refetches that saw no new issue = ingestion has
+            # finished (or died). Stop, and drop the banner.
+            if stable_polls >= 3 {
+                ingesting = False;
+                return lambda { None; };
+            }
+            timer = setTimeout(
+                lambda {
+                    poll_tick = poll_tick + 1;
                     load_queue(active_repo);
-                } },
+                },
                 5000
             );
-            return lambda { clearInterval(interval); };
+            return lambda { clearTimeout(timer); };
         },
-        [ingesting, active_repo]
+        [ingesting, active_repo, issue_total, stable_polls, poll_tick]
     );
 
     def toggle_cluster(cluster_id: str) {

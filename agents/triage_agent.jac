@@ -15,19 +15,90 @@ obj Resolution {
     has method: str = "none";
 }
 
+# Every issue in a batch resolves against the SAME repo checkout, so reading
+# the same files off disk once per issue is pure waste - on a 1000-file repo
+# that was ~1000 reads per issue just to build the summary map. Keyed by
+# absolute path; a repo is re-cloned into a fresh directory, so staleness is
+# only a concern if someone edits the checkout under a running server.
+glob _SOURCE_CACHE: dict[str, str] = {};
+
+def _read_cached(full_path: str) -> str {
+    if full_path in _SOURCE_CACHE {
+        return _SOURCE_CACHE[full_path];
+    }
+    if not os.path.exists(full_path) {
+        _SOURCE_CACHE[full_path] = "";
+        return "";
+    }
+    fh = open(full_path, "r", encoding="utf-8", errors="replace");
+    source: str = fh.read();
+    fh.close();
+    _SOURCE_CACHE[full_path] = source;
+    return source;
+}
+
 """Static lookup: does file `p` (read from repo_root/p) define a top-level or
 method-level `def {symbol}(`? Best-effort - a missing/unreadable file just
 means no match, never an error. This is real source inspection (like
 ast_parser.jac's import scan), not a per-repo guess table."""
 def _defines_symbol(symbol: str, p: str, repo_root: str) -> bool {
-    full_path: str = os.path.join(repo_root, p);
-    if not os.path.exists(full_path) {
-        return False;
+    return f"def {symbol}(" in _read_cached(os.path.join(repo_root, p));
+}
+
+# symbol -> the repo-relative files that define it, built once per checkout.
+# This is the signal that makes resolution work on a repo nobody hardcoded:
+# a report saying "send_file blows up on BytesIO" names a real symbol, and
+# knowing which file DEFINES that symbol beats every filename heuristic.
+glob _DEF_INDEX: dict[str, dict[str, list[str]]] = {};
+
+def _definition_index(repo_root: str, file_paths: list[str]) -> dict[str, list[str]] {
+    if repo_root in _DEF_INDEX {
+        return _DEF_INDEX[repo_root];
     }
-    fh = open(full_path, "r");
-    source: str = fh.read();
-    fh.close();
-    return f"def {symbol}(" in source;
+    index: dict[str, list[str]] = {};
+    for p in file_paths {
+        source: str = _read_cached(os.path.join(repo_root, p));
+        if not source {
+            continue;
+        }
+        # `(?m)` inline rather than a `flags=` argument - Jac's typeshed has no
+        # 3-arg overload for re.findall.
+        for name in re.findall(
+            r"(?m)^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_][A-Za-z0-9_]*)",
+            source
+        ) {
+            if name not in index {
+                index[name] = [];
+            }
+            index[name].append(p);
+        }
+    }
+    _DEF_INDEX[repo_root] = index;
+    return index;
+}
+
+"""Identifier-shaped things a bug report mentions: backticked/@-prefixed
+symbols, snake_case and CamelCase names, and anything written as a call.
+These are what get matched against the definition index."""
+def _mentioned_symbols(text: str) -> list[str] {
+    found: list[str] = [];
+    seen: set[str] = set();
+    patterns: list[str] = [
+        r'[`@]([A-Za-z_][A-Za-z0-9_.]*)',
+        r'\b([A-Za-z_][A-Za-z0-9_]*)\s*\(',
+        r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b',
+        r'\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b'
+    ];
+    for pattern in patterns {
+        for raw in re.findall(pattern, text) {
+            name: str = raw.strip("`@").split(".")[-1];
+            if len(name) > 2 and name not in seen {
+                seen.add(name);
+                found.append(name);
+            }
+        }
+    }
+    return found;
 }
 
 """First non-empty docstring line of file `p`, or "" if unreadable. Gives the
@@ -35,13 +106,7 @@ LLM fallback actual file responsibility instead of just a bare path - the
 difference between guessing from a filename and reasoning about what a file
 does (needed to recognize that unrelated-sounding symptoms share one cause)."""
 def _file_summary(p: str, repo_root: str) -> str {
-    full_path: str = os.path.join(repo_root, p);
-    if not os.path.exists(full_path) {
-        return "";
-    }
-    fh = open(full_path, "r");
-    source: str = fh.read();
-    fh.close();
+    source: str = _read_cached(os.path.join(repo_root, p));
     for line in source.splitlines() {
         stripped = line.strip().strip('"""').strip();
         if stripped {
@@ -60,6 +125,141 @@ def build_file_summaries(file_paths: list[str], repo_root: str | None) -> dict[s
         summaries[p] = _file_summary(p, repo_root);
     }
     return summaries;
+}
+
+# ============================== Candidate shortlisting ==============================
+# The LLM fallback used to be handed EVERY file path in the repo plus a summary
+# for each. That is fine for the 18-file seed repo and impossible for a real
+# open-source one: `jaseci-labs/jac` has 1000+ Python files, and that prompt
+# blows straight past a local 7B model's context window - the call errors or
+# comes back as noise. That is the concrete reason "index any repo" was pulled.
+#
+# So: a cheap, deterministic, LLM-free pre-filter picks the plausible files
+# first, and only those reach the model. Nothing here decides an answer - it
+# only decides what the model is allowed to see - so the resolution itself is
+# still the model's call on a small, honest candidate set.
+glob CANDIDATE_CAP: int = 40;
+
+# Words that appear in half a repo's paths and every bug report - matching on
+# them ranks nothing above anything else.
+glob _STOPWORDS: set[str] = {
+         "the",
+         "and",
+         "for",
+         "with",
+         "that",
+         "this",
+         "when",
+         "from",
+         "have",
+         "has",
+         "not",
+         "but",
+         "you",
+         "are",
+         "was",
+         "were",
+         "there",
+         "here",
+         "src",
+         "lib",
+         "app",
+         "test",
+         "tests",
+         "init",
+         "main",
+         "issue",
+         "bug",
+         "error",
+         "python",
+         "code",
+         "file",
+         "line"
+     };
+
+def _tokens(text: str) -> set[str] {
+    return {
+        t
+        for t in re.findall(r"[a-z0-9]+", text.lower())
+        if len(t) > 2 and t not in _STOPWORDS
+    };
+}
+
+"""How well one candidate path matches the issue text. Token overlap on the
+path itself, plus a large bonus when the body literally names the file (or its
+module), which is as close to a certainty as a lexical signal gets."""
+def _path_score(path: str, issue_tokens: set[str], body_lower: str) -> float {
+    score: float = float(len(_tokens(path.replace("/", " ")) & issue_tokens));
+    if path.lower() in body_lower {
+        score += 20.0;
+    }
+    stem: str = path.split("/")[-1].replace(".py", "").lower();
+    if len(stem) > 3 and stem in issue_tokens {
+        score += 5.0;
+    }
+    return score;
+}
+
+"""The files an LLM should actually be asked to choose between, ranked most
+plausible first. Returns everything (unchanged) for a repo small enough that
+the whole list fits - the seed repo's behavior is bit-for-bit what it was.
+
+Two passes so a big repo never costs a full-repo disk read: rank on the path
+string alone, keep a generous margin, then read docstring summaries for only
+that shortlist and re-rank with them."""
+def shortlist_candidates(
+    title: str,
+    body: str,
+    file_paths: list[str],
+    repo_root: str | None,
+    cap: int = 0
+) -> tuple[list[str], dict[str, str]] {
+    limit: int = cap if cap > 0 else CANDIDATE_CAP;
+    if len(file_paths) <= limit {
+        return (file_paths, build_file_summaries(file_paths, repo_root));
+    }
+
+    issue_tokens: set[str] = _tokens(f"{title} {body}");
+    body_lower: str = f"{title} {body}".lower();
+
+    # Files that DEFINE a symbol the report names. The strongest lexical signal
+    # available without an LLM, and the one that makes a real repo tractable.
+    defines_score: dict[str, float] = {};
+    if repo_root {
+        index: dict[str, list[str]] = _definition_index(repo_root, file_paths);
+        for symbol in _mentioned_symbols(f"{title} {body}") {
+            for p in index.get(symbol, []) {
+                defines_score[p] = defines_score.get(p, 0.0) + 8.0;
+            }
+        }
+    }
+
+    by_path: list[tuple[float, str]] = [
+        (_path_score(p, issue_tokens, body_lower) + defines_score.get(p, 0.0), p)
+        for p in file_paths
+    ];
+    by_path.sort(key=lambda (row: tuple[float, str]) { return (-row[0], row[1]); });
+    # 3x margin: the path string alone is a weak signal, so keep enough
+    # candidates alive for the summary pass to actually change the ranking.
+    prefilter: list[str] = [row[1] for row in by_path[:limit * 3]];
+
+    summaries: dict[str, str] = build_file_summaries(prefilter, repo_root);
+    rescored: list[tuple[float, str]] = [];
+    for p in prefilter {
+        score: float = _path_score(p, issue_tokens, body_lower) + defines_score.get(p, 0.0);
+        score += float(len(_tokens(summaries.get(p, "")) & issue_tokens)) * 1.5;
+        rescored.append((score, p));
+    }
+    rescored.sort(key=lambda (row: tuple[float, str]) { return (-row[0], row[1]); });
+
+    chosen: list[str] = [row[1] for row in rescored[:limit]];
+    return (
+        chosen,
+        {
+            p: summaries.get(p, "")
+            for p in chosen
+        }
+    );
 }
 
 def explicit_resolve(body: str, file_paths: list[str], repo_root: str | None = None) -> str | None {
@@ -98,10 +298,13 @@ def explicit_resolve(body: str, file_paths: list[str], repo_root: str | None = N
         }
         if repo_root {
             # Bare method/function name with no owning module in the text
-            # (`adjust_stock`) - find which file actually defines it.
+            # (`adjust_stock`) - find which file actually defines it. The index
+            # is built once per checkout, so this stays O(1) per symbol even on
+            # a repo with thousands of files.
             last_segment = cleaned.split(".")[-1];
+            definers = _definition_index(repo_root, file_paths).get(last_segment, []);
             for p in file_paths {
-                if _defines_symbol(last_segment, p, repo_root) {
+                if p in definers {
                     return p;
                 }
             }
@@ -162,8 +365,10 @@ def resolve_issue(title: str, body: str, file_paths: list[str], repo_root: str |
         return Resolution(path=None, confidence=0.0, method="none");
     }
 
-    file_summaries = build_file_summaries(file_paths, repo_root);
-    fallback = llm_resolve(title, body, file_paths, file_summaries);
+    # Only the plausible candidates reach the model - see shortlist_candidates.
+    # On a repo small enough to fit, this IS the full file list.
+    (candidates, file_summaries) = shortlist_candidates(title, body, file_paths, repo_root);
+    fallback = llm_resolve(title, body, candidates, file_summaries);
     if fallback.path and fallback.path in file_paths and fallback.confidence >= 0.55 {
         return Resolution(path=fallback.path, confidence=fallback.confidence, method="llm");
     }

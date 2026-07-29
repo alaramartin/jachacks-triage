@@ -407,6 +407,15 @@ walker:pub select_repo {
             import_edges = stats["import_edges"];
         }
 
+        # Two things the UI needs to be honest about a repo that isn't yours:
+        # a Python-only tool indexing a repo with no Python is an empty queue
+        # with no explanation, and a repo you can't push to means PRs will be
+        # opened from a fork (integrations/github.jac's create_pull_request).
+        warning: str = "";
+        if files_indexed == 0 {
+            warning = f"{info.full_name} has no Python files to index - Triage only reads Python, so there's no code graph to rank against.";
+        }
+
         report {
             "ok": True,
             "full_name": info.full_name,
@@ -417,7 +426,9 @@ walker:pub select_repo {
             # The real issue count, NOT RepoSummary.open_issues - that field
             # includes pull requests and would overstate the queue.
             "open_issues": count_open_issues(info.full_name, token),
-            "issues_in_graph": len([repo->:owns:->][?:Issue])
+            "issues_in_graph": len([repo->:owns:->][?:Issue]),
+            "can_push": info.can_push,
+            "warning": warning
         };
     }
 }
@@ -766,7 +777,10 @@ walker:pub generate_pr {
             "pr_number": result.pr_number,
             "pr_url": result.pr_url,
             "title": title,
-            "files_changed": [target_path]
+            "files_changed": [target_path],
+            # True when we had no push access and contributed from a fork.
+            "forked": result.forked,
+            "head_repo": result.head_repo
         };
     }
 }
@@ -830,7 +844,9 @@ walker:pub generate_pr_for_issue {
             "pr_number": result.pr_number,
             "pr_url": result.pr_url,
             "title": title,
-            "files_changed": [target_path]
+            "files_changed": [target_path],
+            "forked": result.forked,
+            "head_repo": result.head_repo
         };
     }
 }
