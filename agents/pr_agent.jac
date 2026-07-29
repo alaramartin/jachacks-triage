@@ -12,6 +12,7 @@ call or GitHub write happens."""
 
 import os;
 import re;
+import difflib;
 import from dotenv { load_dotenv }
 import from graph.nodes {
     Cluster,
@@ -121,6 +122,13 @@ sem generate_fix.proposed_fix_summary = "One sentence describing the intended me
 sem generate_fix.issue_summaries = "One string per linked bug report, formatted '<external_id>: <title> - <body>' - ground the fix in what these reports actually describe.";
 sem generate_fix.retry_hint = "Empty on the first attempt. On a retry, this holds the exact syntax error from the previous attempt - fix that specific mistake this time, most likely a malformed string/docstring quote.";
 
+"""Mirror of clustering.jac's _fix_confidence, for the standalone-issue path
+which never gets a Cluster node to read it off."""
+def _fix_confidence_for(max_diff_lines: int) -> float {
+    score: float = 1.0 - min(max_diff_lines / 150.0, 0.9);
+    return int(score * 100) / 100.0;
+}
+
 def _issue_summary(issue: Issue) -> str {
     return f"{issue.external_id}: {issue.title} - {issue.body}";
 }
@@ -190,27 +198,163 @@ def _repair_module_docstring(content: str) -> str {
     return content;
 }
 
+# ============================== PR body ==============================
+
+obj FixExplanation {
+    has what_changed: str;
+    has why_it_works: str;
+    has risk_notes: str;
+    has test_suggestion: str;
+}
+
+sem FixExplanation = "A reviewer-facing account of one concrete code change: what was edited, why that resolves the reported bugs, what could go wrong, and how to check it.";
+sem FixExplanation.what_changed = "2-4 sentences naming the SPECIFIC functions, conditions or lines that changed and what they do now that they didn't before. Describe the actual edit visible in the diff - not the intent, not a restatement of the root cause. If several things changed, cover each.";
+sem FixExplanation.why_it_works = "2-3 sentences connecting the edit to the reported symptoms: for each linked report, why this change stops that symptom happening. Be concrete about the mechanism.";
+sem FixExplanation.risk_notes = "1-3 sentences on what a reviewer should be suspicious of: behavior this could change for existing callers, edge cases the change does not cover, assumptions it makes. Never say 'no risks' - if it is genuinely low risk, say what you checked to believe that.";
+sem FixExplanation.test_suggestion = "One or two sentences describing a concrete test that would fail before this change and pass after it. Name the input and the expected result.";
+
+"""Explain a change that has ALREADY been made, by reading the before/after
+pair. Deliberately not derived from the issue text: the point is to describe
+what the diff actually does, so a reviewer can check the code rather than
+re-read a restated bug report."""
+def explain_fix(
+    target_path: str,
+    old_source: str,
+    new_source: str,
+    issue_summaries: list[str]
+) -> FixExplanation by llm(temperature=0.0);
+
+sem explain_fix = "Read a source file before and after a change, plus the bug reports the change was meant to fix, and explain the change for a reviewer. Ground every statement in what actually differs between the two versions - if the diff does something the reports didn't ask for, say so in the risk notes.";
+sem explain_fix.target_path = "Repo-relative path of the changed file.";
+sem explain_fix.old_source = "The file's contents BEFORE the change.";
+sem explain_fix.new_source = "The file's contents AFTER the change.";
+sem explain_fix.issue_summaries = "One string per linked bug report, formatted '<external_id>: <title> - <body>'.";
+
+# GitHub caps a PR body at 65536 characters and nobody reviews a 2000-line
+# diff in a description anyway - the Files changed tab exists. Truncate with a
+# visible marker rather than silently producing an invalid body.
+glob MAX_DIFF_LINES: int = 400;
+
+"""Unified diff between the file's current contents and the generated
+replacement, ready to drop in a ```diff block. Empty string if nothing
+changed, which is itself worth knowing."""
+def build_diff(target_path: str, old_source: str, new_source: str) -> str {
+    lines: list[str] = list(
+        difflib.unified_diff(
+            old_source.splitlines(),
+            new_source.splitlines(),
+            fromfile=f"a/{target_path}",
+            tofile=f"b/{target_path}",
+            lineterm=""
+        )
+    );
+    if len(lines) == 0 {
+        return "";
+    }
+    if len(lines) > MAX_DIFF_LINES {
+        kept: int = len(lines) - MAX_DIFF_LINES;
+        lines = lines[:MAX_DIFF_LINES];
+        lines.append(f"... {kept} more lines - see the Files changed tab ...");
+    }
+    return "\n".join(lines);
+}
+
+def _diff_stat(diff_text: str) -> str {
+    added: int = 0;
+    removed: int = 0;
+    for line in diff_text.split("\n") {
+        if line.startswith("+") and not line.startswith("+++") {
+            added += 1;
+        } elif line.startswith("-") and not line.startswith("---") {
+            removed += 1;
+        }
+    }
+    return f"+{added} -{removed}";
+}
+
+"""`Closes #12` only works when external_id is a real GitHub issue number, so
+non-numeric ids (legacy SEED-nn fixtures) degrade to a plain listing rather
+than emitting a closing keyword that would silently do nothing."""
+def _issue_lines(members: list[Issue], repo_full_name: str) -> str {
+    rows: list[str] = [];
+    for i in members {
+        if i.external_id.isdigit() {
+            url: str = f"https://github.com/{repo_full_name}/issues/{i.external_id}";
+            rows.append(f"- Closes #{i.external_id} - [{i.title}]({url})");
+        } else {
+            rows.append(f"- {i.external_id}: {i.title}");
+        }
+    }
+    return "\n".join(rows);
+}
+
 """PR body per CLAUDE.md #8/Phase C: root cause, the blast-radius framing
-('reached by N of M files') that's the whole pitch, and links to every
-member issue - this text is on screen during the demo."""
+('reached by N of M files') that's the whole pitch, and links to every member
+issue - this text is on screen during the demo.
+
+Beyond that it now carries what a reviewer actually needs to act: the real
+before/after diff, an explanation grounded in that diff rather than in the
+issue text, the risks, and a test that would have caught it."""
 def build_pr_body(
     root_cause: str,
     proposed_fix: str,
     blast_radius: int,
     target: File,
     repo: Repo,
-    members: list[Issue]
+    members: list[Issue],
+    diff_text: str,
+    explanation: FixExplanation,
+    urgency: float,
+    fix_confidence: float
 ) -> str {
-    issue_lines: str = "\n".join([f"- {i.external_id}: {i.title}" for i in members]);
-    return (
-        f"## Root cause\n{root_cause}\n\n"
-        f"## Fix\n{proposed_fix}\n\n"
-        f"## Blast radius\n`{target.path}` is reached by **{blast_radius} of "
-        f"{repo.file_count} files** in this repo (transitive structural blast radius), "
-        f"computed by walking the import graph, not by reading the issues.\n\n"
-        f"## Linked issues ({len(members)})\n{issue_lines}\n\n"
-        f"---\n_Opened by Triage. A human clicked Generate PR - nothing here merges itself._"
+    sections: list[str] = [f"## Root cause\n{root_cause}"];
+
+    if explanation.what_changed {
+        sections.append(f"## What changed\n{explanation.what_changed}");
+    } else {
+        sections.append(f"## Fix\n{proposed_fix}");
+    }
+    if explanation.why_it_works {
+        sections.append(f"## Why this fixes it\n{explanation.why_it_works}");
+    }
+
+    if diff_text {
+        # Collapsed: the diff is the evidence, but it shouldn't push the
+        # reasoning off the top of the page.
+        sections.append(
+            f"## Before / after\n"
+            f"<details>\n<summary><code>{target.path}</code> ({_diff_stat(diff_text)})</summary>\n\n"
+            f"```diff\n{diff_text}\n```\n\n</details>"
+        );
+    }
+
+    sections.append(
+        f"## Why this was ranked here\n"
+        f"| | |\n|---|---|\n"
+        f"| Target file | `{target.path}` |\n"
+        f"| Files that transitively reach it | **{blast_radius} of {repo.file_count}** |\n"
+        f"| Linked reports | {len(members)} |\n"
+        f"| Urgency score | {urgency:.2f} |\n"
+        f"| Fix confidence | {fix_confidence:.2f} |\n\n"
+        f"Blast radius is computed by walking this repo's import graph, "
+        f"not by reading the issue text."
     );
+
+    sections.append(
+        f"## Linked issues ({len(members)})\n{_issue_lines(members, repo.full_name)}"
+    );
+
+    if explanation.risk_notes {
+        sections.append(f"## What to check\n{explanation.risk_notes}");
+    }
+    if explanation.test_suggestion {
+        sections.append(f"## Suggested test\n{explanation.test_suggestion}");
+    }
+
+    sections.append(
+        "---\n_Opened by Triage. A human clicked Generate PR - nothing here merges itself._"
+    );
+    return "\n\n".join(sections);
 }
 
 """Shared core behind both entry points below - a PR is always "one target
@@ -227,7 +371,9 @@ def _build_pr(
     blast_radius: int,
     headline: str,
     repo: Repo,
-    token: str
+    token: str,
+    urgency: float = 0.0,
+    fix_confidence: float = 0.0
 ) -> PullRequestResult {
     # Where the repo was actually indexed from (reindex_repo -> Repo.repo_path),
     # not a hardcoded demo path.
@@ -304,8 +450,37 @@ def _build_pr(
     title: str = f"fix({target.path}): {headline}"
         if headline
         else f"fix: {target.path}";
+
+    # The diff is the ground truth about what this PR does, so the explanation
+    # is generated FROM it rather than from the issue text - otherwise the body
+    # describes an intended fix that may not match the code that was written.
+    diff_text: str = build_diff(target.path, source, fix.new_content);
+    explanation: FixExplanation = FixExplanation(
+        what_changed="", why_it_works="", risk_notes="", test_suggestion=""
+    );
+    if diff_text {
+        try {
+            explanation = explain_fix(
+                target.path, source, fix.new_content, summaries
+            );
+        } except Exception as e {
+            # A richer body is not worth losing the PR over - fall back to the
+            # proposed_fix sentence Agent 3 already wrote.
+            print(f"WARNING: couldn't explain the fix for {target.path}: {e}");
+        }
+    }
+
     body: str = build_pr_body(
-        root_cause, proposed_fix, blast_radius, target, repo, members
+        root_cause,
+        proposed_fix,
+        blast_radius,
+        target,
+        repo,
+        members,
+        diff_text,
+        explanation,
+        urgency,
+        fix_confidence
     );
 
     return create_pull_request(
@@ -336,7 +511,9 @@ def build_pr_for_cluster(
         cluster.blast_radius,
         cluster.title,
         repo,
-        token
+        token,
+        cluster.urgency,
+        cluster.fix_confidence
     );
 }
 
@@ -366,6 +543,10 @@ def build_pr_for_issue(issue: Issue, repo: Repo, token: str = "") -> PullRequest
         target.blast_radius,
         issue.title,
         repo,
-        token
+        token,
+        issue.urgency,
+        # A standalone issue has no Cluster, so no Agent 3 fix_confidence.
+        # Derive it the same way Agent 3 does, from the estimated diff size.
+        _fix_confidence_for(issue.estimated_diff_lines)
     );
 }

@@ -1962,3 +1962,37 @@ That is the feature working and the argument for the default in one table: weigh
 heavily and a *feature request* outranks a live parsing bug. Defaults keep both social terms at
 0.0, so out of the box the ranking stays ~80% structural exactly as CLAUDE.md §4.4 requires —
 turning that off is now an explicit, visible choice rather than something nobody can see.
+
+## Task 5 — better PR quality (2026-07-29) — DONE
+
+The old body was four short sections and a bare `- <id>: <title>` list. It asserted a fix
+without showing one, and its issue list was inert text.
+
+- [x] **Real issue links.** `Closes #8 - [title](https://github.com/owner/repo/issues/8)` for
+      every member, so merging the PR closes all of them. `external_id` IS the GitHub issue
+      number for anything ingested from GitHub; a non-numeric id (legacy `SEED-nn`) degrades to
+      a plain listing rather than emitting a closing keyword that would silently do nothing.
+- [x] **Before / after.** A real `difflib.unified_diff` of the current source against the
+      generated replacement, in a collapsed `<details>` block with a `+N -M` stat in the
+      summary. Capped at `MAX_DIFF_LINES` (400) with a visible truncation marker - GitHub's
+      body limit is 65536 chars and nobody reviews a 2000-line diff in a description.
+- [x] **What it did and why, specifically.** New `explain_fix()` `by llm()` returning
+      `FixExplanation` (what_changed / why_it_works / risk_notes / test_suggestion). Generated
+      from the **before/after pair**, deliberately NOT from the issue text - otherwise the body
+      describes an *intended* fix that may not match the code actually written. `risk_notes` is
+      instructed never to say "no risks". Wrapped in try/except: a richer body is not worth
+      losing the PR over, and it falls back to Agent 3's `proposed_fix_summary`.
+- [x] **Provenance table** - target file, files transitively reaching it, linked report count,
+      urgency, fix confidence - keeping the "computed by walking the import graph, not by
+      reading the issue text" line that is the whole pitch.
+- [x] Standalone-issue PRs get the same treatment; `_fix_confidence_for()` mirrors Agent 3's
+      formula for the path that has no Cluster node to read it off.
+
+**Verified** by rendering a complete body end to end against the real `core/validation.py`
+(generate_fix -> valid Python -> diff -> explain_fix -> build_pr_body): 3564 characters, the
+diff correctly showing the `None` guard and the byte-slicing fix, `Closes #8`-#11 all linked,
+and risk notes that actually flag the `normalize_text` edge cases. No GitHub write - the last
+click stays the human's.
+
+⚠️ **Cost:** `explain_fix` is a second LLM call, adding ~20s on top of generate_fix's ~60s.
+Generating a PR is now a **~80 second** operation locally. Task 3.
