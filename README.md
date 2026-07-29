@@ -1,5 +1,11 @@
 # Triage
 
+
+
+https://github.com/user-attachments/assets/2eff0db9-095b-4b8e-b802-2b24b366789a
+
+
+
 ## Inspiration
 
 At one point or another, we have all dealt with a huge repository of code with dozens of open issues. How do you know which one is a minor fix and how do you know which one is quietly breaking half your app? We wanted to build an app that ranks and fixes the most critical issues in your app, so you can focus on building rather than debugging.
