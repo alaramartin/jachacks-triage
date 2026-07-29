@@ -621,7 +621,7 @@ def _ingest_one(
     body: str,
     created_at: str,
     reactions: int,
-    comment_velocity: int
+    comment_velocity: float
 ) -> dict {
     duplicate: Issue | None = _existing_issue(repo, external_id);
     if duplicate is not None {
@@ -711,7 +711,7 @@ walker:pub ingest_issue {
     has body: str;
     has created_at: str;
     has reactions: int = 0;
-    has comment_velocity: int = 0;
+    has comment_velocity: float = 0.0;
     # Which indexed repo this issue belongs to; defaults to the most recently
     # selected one, which is what the live-ingestion demo beat wants.
     has full_name: str = "";
@@ -1067,12 +1067,37 @@ obj UnresolvedView {
     has title: str;
 }
 
+"""The repo's stored ranking weights, echoed back with the queue they ranked.
+
+Sent WITH the queue rather than from a separate endpoint so the panel opens on
+what actually produced the order on screen - the sliders used to mount on
+hardcoded defaults, so a saved preference silently reverted on every reload
+and the displayed positions could disagree with the real ranking."""
+obj WeightsView {
+    has w_blast: float;
+    has w_sev: float;
+    has w_diff: float;
+    has w_reactions: float;
+    has w_comment_velocity: float;
+}
+
+def _weights_view(s: Settings) -> WeightsView {
+    return WeightsView(
+        w_blast=s.w_blast,
+        w_sev=s.w_sev,
+        w_diff=s.w_diff,
+        w_reactions=s.w_reactions,
+        w_comment_velocity=s.w_comment_velocity
+    );
+}
+
 obj QueueResponse {
     has repo: str;
     has file_count: int;
     has clusters: list[ClusterView];
     has singletons: list[SingletonView];
     has unresolved: list[UnresolvedView];
+    has weights: WeightsView;
     # GitHub's real open-issue count as of the last select/ingest, or -1 if
     # never checked. Lets the UI say WHY a queue is empty - no issues exist vs
     # issues exist but none have been triaged - instead of rendering nothing.
@@ -1092,6 +1117,7 @@ walker:pub get_queue {
                 clusters=[],
                 singletons=[],
                 unresolved=[],
+                weights=_weights_view(Settings()),
                 open_issue_count=-1
             );
             disengage;
@@ -1111,8 +1137,8 @@ walker:pub get_queue {
             if len(settings_matches) > 0
             else Settings();
         max_reactions: int = max([i.reactions for i in all_issues], default=0);
-        max_comment_velocity: int = max(
-            [i.comment_velocity for i in all_issues], default=0
+        max_comment_velocity: float = max(
+            [i.comment_velocity for i in all_issues], default=0.0
         );
 
         cluster_views: list[ClusterView] = [];
@@ -1221,6 +1247,7 @@ walker:pub get_queue {
             clusters=cluster_views,
             singletons=singleton_views,
             unresolved=unresolved_views,
+            weights=_weights_view(settings),
             open_issue_count=repo.open_issue_count
         );
     }

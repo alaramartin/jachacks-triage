@@ -361,7 +361,7 @@ obj RemoteIssue {
     has body: str = "";
     has created_at: str = "";
     has reactions: int = 0;
-    has comment_velocity: int = 0;
+    has comment_velocity: float = 0.0;
 }
 
 """Live open issues on `full_name`, read straight from the GitHub REST API -
@@ -399,7 +399,7 @@ def fetch_open_issues(
             created_at: str = r.get("created_at", "");
             comments: int = r.get("comments", 0);
             days_open: float = _days_since(created_at);
-            velocity: int = round(comments / days_open) if days_open > 0 else comments;
+            velocity: float = (comments / days_open) if days_open > 0 else float(comments);
             reaction_block: dict = r.get("reactions", {});
             out.append(
                 RemoteIssue(

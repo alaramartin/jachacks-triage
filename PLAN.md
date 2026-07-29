@@ -1916,3 +1916,49 @@ therefore a ~1.5 minute wait even when everything works. That belongs to task 3.
       destroys nothing**: no JS/TS File nodes exist, the checkout has some, and no Issue has
       resolved onto the existing files. `TeamSnorlax-UX-Agent` went 19 → **72 files** (19 py +
       53 ts/js); `triage-demo`, which has 20 triaged issues, was correctly left untouched.
+
+## Task 4 — personalized ranking settings (2026-07-28) — DONE
+
+The groundwork existed (`Settings` node, `set_weights`, `weighted_urgency` with social terms,
+`get_queue` re-ranking at read time). Three things were actually broken or missing.
+
+- [x] **Stored weights are now loaded.** `get_queue` reports a `WeightsView` alongside the
+      queue it ranked, and the panel mounts on that. Previously `SettingsPanel` hardcoded
+      `w_blast = 6.0` on every mount, so a saved preference silently reverted on reload and the
+      slider positions could disagree with the order actually on screen. Adopted from the FIRST
+      fetch only, so the 5s ingest poll can't yank a slider mid-drag.
+- [x] **The two social weights are on screen** (`w_reactions`, `w_comment_velocity`). They
+      already worked server-side and simply had no control.
+- [x] **BUG: moving any slider silently zeroed the social weights.** `set_weights` defaults the
+      fields it isn't given, and the client only ever sent three of five. All five now go on
+      every call (`apply_weights`).
+- [x] **Reset to structural defaults** button (6/3/1/0/0), disabled when already there.
+- [x] **Per-slider explanation copy.** A slider labelled "reactions" with no explanation invites
+      someone to quietly undo the thing that makes this ranking worth looking at. The panel
+      header also *changes* when social weights are non-zero: it stops claiming the ranking is
+      structural, because it no longer is.
+
+### ⚠️ Bug found while verifying: comment velocity was structurally always zero
+
+`fetch_open_issues` computed `velocity: int = round(comments / days_open)`. Integer division of
+a comment count by days-since-opened is 0 for everything except a brand-new flooded thread — a
+40-comment issue open two years scored identically to one with no comments. The weight attached
+to it could never change any ordering, so the slider would have been decorative.
+
+`comment_velocity` is now a **float** end to end (`Issue`, `RemoteIssue`, `_ingest_one`,
+`ranking.jac`). Verified against live GitHub data: jac issue #7730 now scores `0.2743` where it
+previously rounded to `0`. **Issues ingested before this change keep their integer 0** — they
+need a re-ingest to pick up a real value.
+
+**Verified end to end on `pallets/flask`** (real reaction counts, PRs excluded):
+
+| | `w_reactions = 0` (default) | `w_reactions = 9` |
+| --- | --- | --- |
+| #6093 IPv6 parsing (blast 23) | **3.36 — 1st** | 3.36 — 2nd |
+| #6071 pytest failure (blast 0) | 2.00 — 2nd | 2.00 — 3rd |
+| #6065 feature request, 4 reactions (blast 23) | 1.66 — 3rd | **10.66 — 1st** |
+
+That is the feature working and the argument for the default in one table: weight popularity
+heavily and a *feature request* outranks a live parsing bug. Defaults keep both social terms at
+0.0, so out of the box the ranking stays ~80% structural exactly as CLAUDE.md §4.4 requires —
+turning that off is now an explicit, visible choice rather than something nobody can see.

@@ -389,6 +389,9 @@
   .h-screen {
     height: 100vh;
   }
+  .max-h-\[70vh\] {
+    max-height: 70vh;
+  }
   .min-h-screen {
     min-height: 100vh;
   }
@@ -412,9 +415,6 @@
   }
   .w-56 {
     width: calc(var(--spacing) * 56);
-  }
-  .w-72 {
-    width: calc(var(--spacing) * 72);
   }
   .w-80 {
     width: calc(var(--spacing) * 80);
@@ -575,6 +575,9 @@
   }
   .overflow-y-auto {
     overflow-y: auto;
+  }
+  .rounded {
+    border-radius: 0.25rem;
   }
   .rounded-2xl {
     border-radius: var(--radius-2xl);
@@ -975,6 +978,9 @@
     opacity: 40%;
   }
   @media (hover: hover) {
+    .disabled\:hover\:border-\[var\(--color-border\)\]:disabled:hover {
+      border-color: var(--color-border);
+    }
     .disabled\:hover\:bg-\[var\(--color-green\)\]:disabled:hover {
       background-color: var(--color-green);
     }

@@ -63,7 +63,12 @@ node Issue {
     has root_cause_guess: str = "";
     # --- (reach) social signals, populated by Person 2 from seed data ---
     has reactions: int = 0;
-    has comment_velocity: int = 0;
+    # Comments per day since the issue opened. FLOAT, deliberately: this was
+    # an int computed as round(comments / days_open), which is 0 for anything
+    # but a brand-new flooded thread - a 40-comment issue open for two years
+    # scored the same as one with no comments at all, so the weight attached
+    # to it could never change any ordering.
+    has comment_velocity: float = 0.0;
     # --- written by Agent 4 (Ranking) ---
     has urgency: float = 0.0;
 }

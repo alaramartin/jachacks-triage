@@ -133,7 +133,13 @@ def:pub QueueScreen -> JsxElement {
         generating: dict = {},
         w_blast: float = 6.0,
         w_sev: float = 3.0,
-        w_diff: float = 1.0;
+        w_diff: float = 1.0,
+        w_reactions: float = 0.0,
+        w_comment_velocity: float = 0.0,
+        # Stored weights are adopted from the FIRST get_queue only. Later
+        # fetches (the 5s ingest poll, the refetch after a PR) must not
+        # overwrite what the user is currently dragging.
+        weights_loaded: bool = False;
 
     nav = useNavigate();
     location = useLocation();
@@ -159,6 +165,17 @@ def:pub QueueScreen -> JsxElement {
                 "singletons": [_singleton_to_dict(s) for s in resp.singletons],
                 "unresolved": [_unresolved_to_dict(u) for u in resp.unresolved]
             };
+            # Mount the panel on the weights that actually produced this
+            # order, rather than on client-side defaults that may disagree
+            # with what is stored.
+            if not weights_loaded {
+                w_blast = resp.weights.w_blast;
+                w_sev = resp.weights.w_sev;
+                w_diff = resp.weights.w_diff;
+                w_reactions = resp.weights.w_reactions;
+                w_comment_velocity = resp.weights.w_comment_velocity;
+                weights_loaded = True;
+            }
             seen = len(resp.singletons) + len(resp.unresolved);
             for c in resp.clusters {
                 seen = seen + len(c.issues);
@@ -296,17 +313,45 @@ def:pub QueueScreen -> JsxElement {
         settings_open = not settings_open;
     }
 
-    async def handle_weight_change(key: str, value: float) {
-        next_blast = value if key == "w_blast" else w_blast;
-        next_sev = value if key == "w_sev" else w_sev;
-        next_diff = value if key == "w_diff" else w_diff;
+    # ALL five weights go on every call. set_weights defaults the ones it isn't
+    # given back to their zero/base values, so sending only three meant moving
+    # the blast slider silently reset both social weights to 0.
+    async def apply_weights(
+        next_blast: float,
+        next_sev: float,
+        next_diff: float,
+        next_reactions: float,
+        next_velocity: float
+    ) {
         w_blast = next_blast;
         w_sev = next_sev;
         w_diff = next_diff;
+        w_reactions = next_reactions;
+        w_comment_velocity = next_velocity;
         root spawn set_weights(
-            full_name=active_repo, w_blast=next_blast, w_sev=next_sev, w_diff=next_diff
+            full_name=active_repo,
+            w_blast=next_blast,
+            w_sev=next_sev,
+            w_diff=next_diff,
+            w_reactions=next_reactions,
+            w_comment_velocity=next_velocity
         );
         await load_queue(active_repo);
+    }
+
+    async def handle_weight_change(key: str, value: float) {
+        await apply_weights(
+            value if key == "w_blast" else w_blast,
+            value if key == "w_sev" else w_sev,
+            value if key == "w_diff" else w_diff,
+            value if key == "w_reactions" else w_reactions,
+            value if key == "w_comment_velocity" else w_comment_velocity
+        );
+    }
+
+    # CLAUDE.md 4.4's locked weights, with both social signals back off.
+    async def handle_weight_reset {
+        await apply_weights(6.0, 3.0, 1.0, 0.0, 0.0);
     }
 
     def dismiss_banner(_e: MouseEvent) {
@@ -419,9 +464,12 @@ def:pub QueueScreen -> JsxElement {
                         w_blast={w_blast}
                         w_sev={w_sev}
                         w_diff={w_diff}
+                        w_reactions={w_reactions}
+                        w_comment_velocity={w_comment_velocity}
                         open={settings_open}
                         onToggle={toggle_settings}
                         onChange={handle_weight_change}
+                        onReset={handle_weight_reset}
                     />
                 </div>
             </div>

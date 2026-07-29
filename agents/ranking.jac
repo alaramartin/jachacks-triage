@@ -71,10 +71,10 @@ def weighted_urgency(
     severity: int,
     estimated_diff_lines: int,
     reactions: int,
-    comment_velocity: int,
+    comment_velocity: float,
     file_count: int,
     max_reactions: int,
-    max_comment_velocity: int,
+    max_comment_velocity: float,
     settings: Settings
 ) -> float {
     blast_norm: float = (blast_radius / file_count) if file_count > 0 else 0.0;
@@ -102,13 +102,13 @@ def weighted_cluster_urgency(
     members: list[Issue],
     file_count: int,
     max_reactions: int,
-    max_comment_velocity: int,
+    max_comment_velocity: float,
     settings: Settings
 ) -> float {
     max_sev: int = max([m.severity for m in members]);
     max_diff: int = max([m.estimated_diff_lines for m in members]);
     max_member_reactions: int = max([m.reactions for m in members]);
-    max_member_velocity: int = max([m.comment_velocity for m in members]);
+    max_member_velocity: float = max([m.comment_velocity for m in members]);
     return weighted_urgency(
         cluster_blast_radius,
         max_sev,
