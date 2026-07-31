@@ -22,6 +22,18 @@ import re;
 # Same spirit as ast_parser's SKIP_DIRS, plus the directories a JS repo fills
 # with build output and vendored code. Indexing `dist/` would double-count
 # every file and wreck the blast-radius numbers with machine-generated copies.
+# Test and example trees are excluded, which is NOT just a speed decision.
+# `vercel/next.js` has 22,077 indexable JS/TS files and 13,226 of them - 60% -
+# live under `test/`, overwhelmingly fixtures: tiny files that import each other
+# and nothing real. Indexing them buys nothing (nobody triages a fixture) and
+# actively corrupts the product, because blast radius counts fixture-to-fixture
+# imports as structural dependency. Excluding them takes next.js from 22,077
+# indexable files to 3,277.
+#
+# Deliberately NOT applied to Python discovery: flask's `tests/conftest.py` is a
+# real resolution target in the current baseline, Python repos don't carry
+# thousands of fixtures, and changing it would move numbers this project's
+# verification depends on.
 glob JS_SKIP_DIRS: set[str] = {
          ".git",
          "node_modules",
@@ -39,7 +51,19 @@ glob JS_SKIP_DIRS: set[str] = {
          ".vercel",
          ".output",
          ".cache",
-         "storybook-static"
+         "storybook-static",
+         "test",
+         "tests",
+         "__tests__",
+         "__mocks__",
+         "fixtures",
+         "__fixtures__",
+         "e2e",
+         "examples",
+         "example",
+         "bench",
+         "benchmarks",
+         "evals"
      };
 
 # Order matters: this is the extension resolution order for an extensionless

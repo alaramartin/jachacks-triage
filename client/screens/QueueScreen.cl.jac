@@ -161,6 +161,7 @@ def:pub QueueScreen -> JsxElement {
                 "repo": resp.repo,
                 "file_count": resp.file_count,
                 "open_issue_count": resp.open_issue_count,
+                "index_note": resp.index_note,
                 "clusters": [_cluster_to_dict(c) for c in resp.clusters],
                 "singletons": [_singleton_to_dict(s) for s in resp.singletons],
                 "unresolved": [_unresolved_to_dict(u) for u in resp.unresolved]
@@ -354,6 +355,12 @@ def:pub QueueScreen -> JsxElement {
         await apply_weights(6.0, 3.0, 1.0, 0.0, 0.0);
     }
 
+    # Purely structural: every non-graph term zeroed. Also the honest setting to
+    # look at while severity is still being assessed.
+    async def handle_structural_only {
+        await apply_weights(6.0, 0.0, 0.0, 0.0, 0.0);
+    }
+
     def dismiss_banner(_e: MouseEvent) {
         pr_result = None;
     }
@@ -467,6 +474,10 @@ def:pub QueueScreen -> JsxElement {
                             queue["file_count"]
                         )} files indexed · ranked by structural blast radius, not by how the issue is worded.
                     </p>
+                    {(queue["index_note"] as str)
+                    and <p className="mt-1 text-xs text-[var(--color-orange)]">
+                        {queue["index_note"]}
+                    </p>}
                     {ingesting
                     and <p className="mt-2 text-sm text-[var(--color-green)]">
                         {progress_label}
@@ -483,6 +494,7 @@ def:pub QueueScreen -> JsxElement {
                         onToggle={toggle_settings}
                         onChange={handle_weight_change}
                         onReset={handle_weight_reset}
+                        onStructuralOnly={handle_structural_only}
                     />
                 </div>
             </div>
@@ -492,17 +504,35 @@ def:pub QueueScreen -> JsxElement {
                     className="mt-6 rounded-xl border border-[var(--color-green)]/40 bg-[var(--color-green-soft)] px-4 py-3 flex items-center justify-between"
                 >
                     <span className="text-sm text-[var(--color-text)]">
-                        PR #
-                        {str(pr_result["pr_number"])}{" "}
-                        opened -{" "}
-                        <a
-                            href={pr_result["pr_url"]}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="underline text-[var(--color-green)]"
-                        >
-                            review on GitHub
-                        </a>
+                        {if pr_result.get("compare_url", "") {
+                            <span key="fork">
+                                Branch pushed to your fork. Nothing has been filed on{" "}
+                                {repo_name}
+                                {" "}- read the diff, then open the PR yourself:{" "}
+                                <a
+                                    href={pr_result["compare_url"]}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline text-[var(--color-green)]"
+                                >
+                                    review and open on GitHub
+                                </a>
+                            </span>
+                        } else {
+                            <span key="direct">
+                                PR #
+                                {str(pr_result["pr_number"])}{" "}
+                                opened -{" "}
+                                <a
+                                    href={pr_result["pr_url"]}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline text-[var(--color-green)]"
+                                >
+                                    review on GitHub
+                                </a>
+                            </span>
+                        }}
                     </span>
                     <button
                         onClick={dismiss_banner}

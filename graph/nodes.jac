@@ -41,6 +41,10 @@ node Repo {
     # multiplicities of 1-5. Treated as stale after INGEST_LOCK_TIMEOUT so a
     # crashed run can't wedge the repo permanently.
     has ingesting_since: float = 0.0;
+    # Set when the code substrate was TRUNCATED by MAX_INDEXED_FILES, so the
+    # dashboard can say that its blast-radius numbers cover a subset. Empty
+    # when the whole repo was indexed, which is the normal case.
+    has index_note: str = "";
 }
 
 node File {

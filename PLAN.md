@@ -2085,3 +2085,159 @@ One difference from the captured snapshot: a third cluster, `models/product.py` 
 "3 clusters: `core/validation.py` × 4 / blast 14, `models/product.py` × 2, `services/upload.py`
 × 2". The snapshot had been taken after task 2's dedupe repair, which deleted that cluster along
 with the duplicate members and never re-clustered it. The new interrupted-batch sweep fixed it.
+
+## Task 3 follow-up — what "it doesn't feel faster" actually was (2026-07-29)
+
+Reported against `github.com/vercel/next.js`: five minutes on "Cloning and indexing the code
+graph", then a queue that counted down 17 minutes and never triaged anything. None of task 3's
+work applied, because none of it was the bottleneck. Two of these were regressions introduced
+earlier the same day.
+
+### 1. Indexing a monorepo — my task 1b regression
+
+Adding TypeScript/JavaScript support put no bound on discovery. next.js has **22,077** indexable
+JS/TS files. Measured: reading and regex-scanning all of them takes **5.2s** - irrelevant.
+Creating the graph nodes runs at **~39 anchors/second**, so 22,077 File nodes is **9-12 minutes**.
+A probe timed out at 2 minutes trying to create 4,200 nodes.
+
+- **Test/fixture/example trees excluded from JS discovery** (`test`, `__tests__`, `fixtures`,
+  `examples`, `bench`, `e2e`, …). 13,226 of next.js's 22,077 files - 60% - are under `test/`,
+  overwhelmingly fixtures. This is a correctness argument as much as a speed one: nobody triages
+  a fixture, and fixture-to-fixture imports were being counted as structural dependency, which
+  corrupts blast radius. **22,077 → 3,149.** Deliberately NOT applied to Python discovery -
+  flask's `tests/conftest.py` is a real resolution target in the baseline.
+- **`MAX_INDEXED_FILES = 1500`, chosen by in-degree** over the fully-parsed import graph. Parsing
+  first is cheap, which makes the cut principled: blast radius is about what other code depends
+  on, so the most-imported files are the ones worth ranking against, and a file nothing imports
+  has blast radius 0 anyway. Every repo already in the graph is far under the ceiling, so no
+  baseline moves.
+- **`select_repo` on next.js: ~9-12 min → 156s.**
+
+### 2. It never triaged at all — my regression from 20 minutes earlier
+
+`ingest_from_github` was called **zero** times. The picker had `if picked["warning"] { return; }`,
+written when the only possible warning meant "nothing indexable, this can never work". Then the
+truncation notice above started populating `warning` for large repos, so the picker treated
+"indexed 1500 of 3149 files" as fatal: it indexed, navigated to the queue, and silently skipped
+ingestion. The 17-minute countdown was polling for work nobody started.
+
+Fixed by separating *unusable* from *usable with a caveat*: `select_repo` reports `indexable`
+(false only when there is genuinely nothing to parse) and the client gates on **that**. The
+truncation notice moved onto `Repo.index_note` and renders on the dashboard next to the file
+count, where the blast-radius claim it qualifies actually lives.
+
+**Lesson worth keeping: a new warning string silently changed control flow three screens away.**
+Anything the UI branches on needs a dedicated field, not a non-empty message.
+
+### 3. 41s per issue on next.js vs 4s on the seed repo
+
+Two causes, found by measuring each candidate rather than guessing:
+
+- **Per-issue graph re-traversal.** `_ingest_one` re-derived the file list and the existing-issue
+  set from the graph for every issue - two walks of all 1500+ owned nodes each time. Hoisted to
+  once per batch (`files_hint`, `seen_ids`, with ids added as issues are written so within-batch
+  duplicates are still caught; the repo lock covers concurrency). Worth ~5s/issue - **less than
+  expected**, which is why it was worth measuring the rest.
+- **Issue body length, which was the real cost.** Prefill runs at ~200 tok/s and every LLM call
+  carries the body. A 3,629-byte next.js body measured **6.33s of prefill** against **0.58s** for
+  a 181-byte seed body - and an LLM-resolved issue pays it three times. `LLM_BODY_CHARS = 1500`
+  now clips what the *model* sees. The deterministic matcher (`explicit_resolve`) still gets the
+  **full** body, since it is free and it is what finds a traceback or path buried at the end.
+
+  Provably neutral on the baseline: the seed repo's largest body is **663 chars**, so
+  `_llm_body()` returns all 20 of them byte-identical.
+
+  Measured on three real next.js bodies, same call, full vs clipped:
+
+  | body | full | clipped | saving |
+  | --- | --- | --- | --- |
+  | 3,629 B | 8.36s (1023 tok) | 2.71s (494 tok) | 68% |
+  | 5,183 B | 11.38s (1412 tok) | 2.77s (439 tok) | 76% |
+  | 4,554 B | 10.20s (1288 tok) | 2.67s (464 tok) | 74% |
+
+  Mean per LLM call **9.98s → 2.72s**. That is 10.0s → 2.7s for an
+  explicit-resolution issue and 29.9s → 8.1s for an LLM-resolved one, i.e. next.js
+  should land near **8-12s/issue against the 36.5s measured before**.
+
+  ⚠️ That last figure is an attribution from per-call measurements, NOT a clean
+  end-to-end run: repeated attempts to time a full next.js ingest kept colliding
+  with the per-repo ingest lock (a previous run still held it server-side), so the
+  wall-clock numbers from those runs are contaminated and were discarded rather
+  than reported. Worth confirming with one uninterrupted run.
+
+### Still open (not fixed)
+
+- **`get_queue` is O(files) on a large repo** - it filters Issues out of all 1500+ owned nodes,
+  and the dashboard polls it every 5s. On next.js that read is slow enough to time out a 25s
+  request. This is the next real bottleneck for big repos.
+- **209 issues is still a long job.** Per-issue cost is down, but "triage everything in the
+  background" means next.js runs for a while regardless. A default cap plus a "triage the next N"
+  control would change how a repo that size feels more than any further per-issue tuning.
+
+## Task 3 — final state after reverting the two-phase ingest (2026-07-29)
+
+The two-phase split (deterministic pass first, LLM pass second) was **built, measured and
+reverted**. Recording why, because the measurements are the useful part.
+
+It *did* satisfy the accuracy requirement — it converged to exactly the documented clusters with
+no extra user action. It was reverted for three reasons:
+
+1. **It was slower, not faster.** 528s for the seed repo's 20 issues against 83s single-pass,
+   because `_assess_deep` returned the target for already-placed issues too, so every severity
+   update marked its file dirty and triggered a redundant ~7.8s clustering call. Narrowing that
+   to membership-changes-only got it to 178s - still worse than single-pass.
+2. **The 95%-free-placement figure does not generalize.** 53/56 next.js issues resolve
+   deterministically because its issues are templated with stack traces and paths. On the seed
+   repo it is **5/20 (25%)**, because those issues were deliberately written to share no
+   vocabulary and name no files - which is the entire point of the clustering demo. The repos
+   that most need clustering are the ones where the fast path helps least.
+3. **It added a schema field (`assessed`, then `cluster_checked`) and broke persistence.**
+   Changing `Issue` shifted its fingerprint; jac logged 26 × `schema drift on graph.nodes.Issue`
+   and then **wrote the edges but not the Issue nodes** - 0 `Issue` anchors alongside 16
+   `resolves_to` and 2 `grouped_in`. `rm -rf .jac/cache` clears the compile cache, not persisted
+   anchors, and there is no migration. Net lesson: **adding a field to a node with existing
+   persisted instances is not free in this runtime.**
+
+### The correctness bug that mattered more than the speed
+
+Coalescing clustering to "every N issues" (a task 3 optimization, present in the single-pass
+path too) meant that **between drains a file rendered as a cluster AND as loose singletons at
+the same time** - observed directly: #9 and #10 shown as standalone rows with
+`target_path = core/validation.py` while that file already had a 2-member cluster. Not
+incomplete: contradictory.
+
+Clustering now runs **immediately, every time a `resolves_to` edge lands**. The N-1 redundant
+gate calls per file are the accepted price. Verified by polling `get_queue` throughout a run and
+asserting no singleton shares a `target_path` with an existing cluster.
+
+### Verified final state
+
+`reset_demo` → full re-ingest of `alaramartin/triage-demo`:
+
+| | result |
+| --- | --- |
+| clusters | `core/validation.py` ×4 / blast **14**, `models/product.py` ×2 / 5, `services/upload.py` ×2 / 1 |
+| parked | `18, 20, 26, 27` — identical to baseline |
+| resolution diffs vs baseline | **0** across all 20 issues |
+| mid-run inconsistency | **none observed** |
+| wall clock | **79s** (warm assessment cache: 60 hits / 57 misses; a cold run is ~180s) |
+
+### Kept from task 3
+
+Bounded monorepo indexing (test/fixture exclusion + 1500-file in-degree ceiling), the
+`indexable`-vs-`warning` split that stopped truncation from silently skipping ingestion,
+`LLM_BODY_CHARS` body clipping (9.98s → 2.72s per call on real bodies), snippet-edit PR
+generation (34.5s → 13.5s), the assessment cache, model warmup, per-batch hoisting of the file
+list and seen-id set, `CANDIDATE_CAP = 30`, and the ranking-panel additions (5 weights, stored
+weights loaded, reset + "blast radius only" presets).
+
+### Known-remaining
+
+- **`get_queue` is O(files)** and the dashboard polls it every 5s; slow enough on a 1500-file
+  repo to time out a 25s request.
+- **Dangling edges** in the current dev graph (16 `resolves_to`, 2 `grouped_in`, 1
+  `cluster_targets`) left by the failed persistence. Verified harmless - a full seed re-ingest
+  produced the correct queue with them present - but a `.jac/data` wipe would clear them at the
+  cost of re-indexing 2,035 files.
+- A cold seed-repo ingest is ~180s now (was 83s coalesced, ~194s originally). That is the
+  deliberate trade for never rendering a contradictory queue.

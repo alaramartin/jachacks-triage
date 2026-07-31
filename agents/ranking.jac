@@ -65,9 +65,9 @@ def on_issue_resolved(
     cluster: Cluster | None = maybe_cluster(target);
 
     if cluster is not None {
-        members: list[Issue] = [target<-:resolves_to:<-];
-        rank_cluster(cluster, members, repo);
-        for m in members {
+        resolved_members: list[Issue] = [target<-:resolves_to:<-];
+        rank_cluster(cluster, resolved_members, repo);
+        for m in resolved_members {
             rank_issue(m, target, repo);
         }
     } else {

@@ -60,7 +60,8 @@ def:pub SettingsPanel(
     open: bool,
     onToggle: Callable[[], None],
     onChange: Callable[[str, float], None],
-    onReset: Callable[[], None]
+    onReset: Callable[[], None],
+    onStructuralOnly: Callable[[], None]
 ) -> JsxElement {
     def handle_toggle(_e: MouseEvent) {
         onToggle();
@@ -68,6 +69,10 @@ def:pub SettingsPanel(
 
     def handle_reset(_e: MouseEvent) {
         onReset();
+    }
+
+    def handle_structural(_e: MouseEvent) {
+        onStructuralOnly();
     }
 
     def value_for(key: str) -> float {
@@ -158,6 +163,15 @@ def:pub SettingsPanel(
                     <div className="flex flex-col gap-4">
                         {[slider(row) for row in WEIGHT_ROWS]}
                     </div>
+                    <button
+                        onClick={handle_structural}
+                        className="mt-4 w-full rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-green)] hover:text-[var(--color-text)]"
+                    >
+                        Blast radius only
+                    </button>
+                    <p className="mt-1 text-[11px] leading-snug text-[var(--color-text-muted)]">
+                        Zeroes every other weight, so the order is purely what the import graph says. Useful for showing that the ranking is structural rather than textual.
+                    </p>
                     <button
                         onClick={handle_reset}
                         disabled={structural_only

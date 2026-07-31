@@ -303,6 +303,9 @@ obj PullRequestResult {
     # can push to it; the user's fork otherwise (see create_pull_request).
     has head_repo: str = "";
     has forked: bool = False;
+    # Set when the branch was pushed to a fork and NO upstream PR was opened.
+    # The human follows this link to file it themselves, having read the diff.
+    has compare_url: str = "";
 }
 
 # An empty `token` falls back to .env's GITHUB_TOKEN; unauthenticated (both
@@ -596,7 +599,8 @@ def create_pull_request(
     default_branch: str = "main",
     path: str = "",
     new_content: str = "",
-    token: str = ""
+    token: str = "",
+    open_upstream: bool = False
 ) -> PullRequestResult {
     active: str = token if token else GITHUB_TOKEN;
     if not active {
@@ -676,6 +680,30 @@ def create_pull_request(
         if put_result.error {
             return PullRequestResult(ok=False, error=put_result.error);
         }
+    }
+
+    # STOP HERE when contributing to somebody else's repo.
+    #
+    # A cross-repo pull request is filed against the UPSTREAM project - that is
+    # what a PR is - so opening one automatically would drop an LLM-written
+    # patch onto a public repo under the user's name, unannounced, with no
+    # chance to read it first. That is spam to maintainers, and it makes a
+    # nonsense of "the maintainer keeps the trigger" (CLAUDE.md #2): the user
+    # clicked a button, they did not agree to publish to pallets/flask.
+    #
+    # So the branch is pushed to the fork and we hand back GitHub's compare
+    # link. One click opens the PR form, pre-filled, with the diff visible -
+    # and the decision to publish stays a deliberate, informed act.
+    # Repos the user CAN push to are unaffected: those are theirs to write to.
+    if forked and not open_upstream {
+        return PullRequestResult(
+            ok=True,
+            pr_number=0,
+            pr_url="",
+            compare_url=f"https://github.com/{full_name}/compare/{default_branch}...{head_owner}:{branch_name}?expand=1",
+            head_repo=head_repo,
+            forked=True
+        );
     }
 
     # Cross-repo PRs identify the source branch as "<fork owner>:<branch>".

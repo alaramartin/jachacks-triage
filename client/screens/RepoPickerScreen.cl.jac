@@ -111,9 +111,12 @@ def:pub RepoPickerScreen -> JsxElement {
             return;
         }
 
-        # A repo in a language we can't parse indexes to an empty code graph.
-        # Say so here instead of navigating to a queue that can never fill.
-        if picked["warning"] {
+        # Only a repo with NOTHING indexable is a dead end. Gate on `indexable`,
+        # never on `warning` being non-empty: a large repo reports a truncation
+        # notice and is perfectly usable, and treating that as fatal silently
+        # skipped ingestion entirely (vercel/next.js indexed, then never
+        # triaged a single issue).
+        if not picked["indexable"] {
             warning = picked["warning"];
             busy_repo = "";
             progress = "";

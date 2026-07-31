@@ -474,7 +474,8 @@ def _build_pr(
     repo: Repo,
     token: str,
     urgency: float = 0.0,
-    fix_confidence: float = 0.0
+    fix_confidence: float = 0.0,
+    open_upstream: bool = False
 ) -> PullRequestResult {
     # Where the repo was actually indexed from (reindex_repo -> Repo.repo_path),
     # not a hardcoded demo path.
@@ -624,14 +625,15 @@ def _build_pr(
         repo.default_branch,
         target.path,
         fix.new_content,
-        token
+        token,
+        open_upstream
     );
 }
 
 """Entry point `generate_pr` (main.jac) calls - the cluster is the unit of
 action (CLAUDE.md #2), so this stays the primary path."""
 def build_pr_for_cluster(
-    cluster: Cluster, repo: Repo, token: str = ""
+    cluster: Cluster, repo: Repo, token: str = "", open_upstream: bool = False
 ) -> PullRequestResult {
     targets: list[File] = [cluster->:cluster_targets:->][?:File];
     if len(targets) == 0 {
@@ -647,7 +649,8 @@ def build_pr_for_cluster(
         repo,
         token,
         cluster.urgency,
-        cluster.fix_confidence
+        cluster.fix_confidence,
+        open_upstream
     );
 }
 
@@ -655,7 +658,9 @@ def build_pr_for_cluster(
 issue that never clustered. Same pipeline, same human trigger - the only
 difference is that the root cause and fix are derived for this one report
 instead of read off a Cluster node."""
-def build_pr_for_issue(issue: Issue, repo: Repo, token: str = "") -> PullRequestResult {
+def build_pr_for_issue(
+    issue: Issue, repo: Repo, token: str = "", open_upstream: bool = False
+) -> PullRequestResult {
     targets: list[File] = [issue->:resolves_to:->][?:File];
     if len(targets) == 0 {
         return PullRequestResult(
@@ -681,6 +686,7 @@ def build_pr_for_issue(issue: Issue, repo: Repo, token: str = "") -> PullRequest
         issue.urgency,
         # A standalone issue has no Cluster, so no Agent 3 fix_confidence.
         # Derive it the same way Agent 3 does, from the estimated diff size.
-        _fix_confidence_for(issue.estimated_diff_lines)
+        _fix_confidence_for(issue.estimated_diff_lines),
+        open_upstream
     );
 }

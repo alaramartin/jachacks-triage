@@ -441,6 +441,25 @@ def resolve_issue(title: str, body: str, file_paths: list[str], repo_root: str |
     return Resolution(path=None, confidence=conf, method="none");
 }
 
+# Real bug reports are long - environment dumps, reproduction steps, full logs.
+# Prefill is ~200 tok/s, so body length is a direct per-call cost: a 3.6KB
+# next.js body measured 6.33s of prefill against 0.58s for a 181-byte seed-repo
+# body, and it is paid by EVERY LLM call the issue makes. Truncating what the
+# model sees is the single biggest lever on a real repo.
+#
+# The DETERMINISTIC matcher (explicit_resolve) still gets the full body - it is
+# pure Python and free, and it is what finds a traceback or a file path buried at
+# the end of a long report. Only the LLM's copy is clipped, and the front of a
+# report is where the symptom is stated; the tail is environment noise.
+glob LLM_BODY_CHARS: int = 1500;
+
+def _llm_body(body: str) -> str {
+    if len(body) <= LLM_BODY_CHARS {
+        return body;
+    }
+    return body[:LLM_BODY_CHARS] + "\n...[truncated]";
+}
+
 # ============================== Merged assessment ==============================
 # Everything above still exists and is what the unit tests exercise. What
 # ingestion actually calls is below, and the difference is purely how many
@@ -506,9 +525,12 @@ and of resolution."""
 def triage_issue(
     title: str, body: str, file_paths: list[str], repo_root: str | None = None
 ) -> TriagedIssue {
+    # Full body for the deterministic matcher; clipped for anything that pays
+    # prefill on it.
     explicit_path = explicit_resolve(body, file_paths, repo_root);
+    brief: str = _llm_body(body);
     if explicit_path {
-        impact = assess_impact(title, body);
+        impact = assess_impact(title, brief);
         return TriagedIssue(
             path=explicit_path,
             confidence=0.95,
@@ -519,8 +541,8 @@ def triage_issue(
     }
 
     # The specificity gate stays its own focused call - see the warning above.
-    impact = assess_impact(title, body);
-    if assess_specificity(title, body) == ReportSpecificity.VAGUE {
+    impact = assess_impact(title, brief);
+    if assess_specificity(title, brief) == ReportSpecificity.VAGUE {
         return TriagedIssue(
             path=None,
             confidence=0.0,
@@ -533,7 +555,7 @@ def triage_issue(
     # Only the plausible candidates reach the model - see shortlist_candidates.
     # On a repo small enough to fit, this IS the full file list.
     (candidates, file_summaries) = shortlist_candidates(title, body, file_paths, repo_root);
-    fallback = llm_resolve(title, body, candidates, file_summaries);
+    fallback = llm_resolve(title, brief, candidates, file_summaries);
     if fallback.path and fallback.path in file_paths and fallback.confidence >= 0.55 {
         return TriagedIssue(
             path=fallback.path,

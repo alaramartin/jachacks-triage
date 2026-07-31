@@ -21,7 +21,11 @@ import from graph.nodes {
 }
 import from integrations.ast_parser { build_code_substrate, count_import_edges }
 import from integrations.js_parser { discover_js_files }
-import from agents.blast_radius { compute_blast_radius, build_dependency_graph }
+import from agents.blast_radius {
+    compute_blast_radius,
+    maybe_compute_blast_radius,
+    build_dependency_graph
+}
 import from agents.triage_agent { triage_issue, TriagedIssue }
 import from agents.ranking {
     on_issue_resolved,
@@ -149,11 +153,6 @@ glob DEMO_VIDEO_URL: str = os.environ.get("TRIAGE_DEMO_VIDEO_URL", "");
 # How long a Repo.ingesting_since lock is honored before being treated as
 # abandoned. Generous: a big repo legitimately takes an hour at ~9s/issue.
 glob INGEST_LOCK_TIMEOUT: float = 3600.0;
-
-# How often a batch ingest runs deferred clustering. Small enough that clusters
-# show up in the live queue while a long run is still going, large enough that
-# the N-1 redundant re-clusterings per file are collapsed away.
-glob CLUSTER_DRAIN_EVERY: int = 10;
 
 # ============================== Assessment cache ==============================
 # Agent 1's verdict is deterministic for the same issue text, repo and model, so
@@ -520,6 +519,7 @@ walker:pub select_repo {
         import_edges: int = 0;
         python_files: int = 0;
         js_files: int = 0;
+        files_skipped: int = 0;
         # A repo indexed BEFORE TypeScript/JS support keeps its Python-only
         # substrate forever, because this branch short-circuits. Rebuild it -
         # but only when doing so destroys nothing: no JS/TS File nodes exist,
@@ -552,6 +552,7 @@ walker:pub select_repo {
             import_edges = stats["import_edges"];
             python_files = stats["python_files"];
             js_files = stats["js_files"];
+            files_skipped = stats["files_skipped"];
         }
 
         # Two things the UI needs to be honest about a repo that isn't yours:
@@ -561,6 +562,14 @@ walker:pub select_repo {
         warning: str = "";
         if files_indexed == 0 {
             warning = f"{info.full_name} has no Python, TypeScript or JavaScript files to index - those are the languages Triage can build a code graph from, so there's nothing to rank against.";
+        }
+
+        # A TRUNCATION notice is not a failure - it must not stop ingestion the
+        # way "nothing indexable" does. It is stored on the Repo and shown on
+        # the dashboard next to the file count instead, so the blast-radius
+        # claim there carries its own caveat.
+        if files_skipped > 0 {
+            repo.index_note = f"{str(files_indexed + files_skipped)} source files found; indexed the {str(files_indexed)} most depended-upon, so blast radius understates the rest.";
         }
 
         # The real issue count, NOT RepoSummary.open_issues - that field
@@ -581,6 +590,11 @@ walker:pub select_repo {
             "can_push": info.can_push,
             "python_files": python_files,
             "js_files": js_files,
+            "files_skipped": files_skipped,
+            # False only when there is nothing this tool can parse. The client
+            # must gate ingestion on THIS, not on `warning` being non-empty.
+            "indexable": files_indexed > 0,
+            "index_note": repo.index_note,
             "warning": warning
         };
     }
@@ -743,9 +757,24 @@ def _ingest_one(
     created_at: str,
     reactions: int,
     comment_velocity: float,
-    dirty: list[File] | None = None
+    dirty: list[File] | None = None,
+    # Batch ingestion passes these in. Re-deriving them per issue means two
+    # traversals of every node the repo owns, which on a 1500-file repo cost
+    # more than the LLM calls did: next.js measured 41s per issue against ~4s
+    # on the seed repo. `seen_ids` is seeded once and updated as issues are
+    # written, so within-batch duplicates are still caught; the Repo-level
+    # ingest lock is what guards against a concurrent run.
+    files_hint: list[File] | None = None,
+    seen_ids: set[str] | None = None
 ) -> dict {
-    duplicate: Issue | None = _existing_issue(repo, external_id);
+    duplicate: Issue | None = None;
+    if seen_ids is not None {
+        if external_id in seen_ids {
+            duplicate = _existing_issue(repo, external_id);
+        }
+    } else {
+        duplicate = _existing_issue(repo, external_id);
+    }
     if duplicate is not None {
         resolved: list[File] = [duplicate->:resolves_to:->][?:File];
         return {
@@ -756,7 +785,7 @@ def _ingest_one(
         };
     }
 
-    files: list[File] = [repo->:owns:->][?:File];
+    files: list[File] = files_hint if files_hint is not None else [repo->:owns:->][?:File];
     file_paths: list[str] = [f.path for f in files];
 
     # One LLM round trip when an explicit signal placed the issue, one when the
@@ -787,6 +816,9 @@ def _ingest_one(
         comment_velocity=comment_velocity,
     );
     repo +>:owns:+> issue;
+    if seen_ids is not None {
+        seen_ids.add(external_id);
+    }
 
     if resolution.path is None {
         unresolved_matches: list[Unresolved] = [repo->:owns:->][?:Unresolved];
@@ -936,14 +968,19 @@ walker:pub ingest_from_github {
         results: list[dict] = [];
         skipped: int = 0;
         remote_issues: list[RemoteIssue] = [];
-        # Files that gained a resolves_to edge and still need Agent 3 run over
-        # them. Drained every CLUSTER_DRAIN_EVERY issues rather than only at the
-        # end, so clusters still appear in the live queue during a long run.
         dirty: list[File] = [];
+        # Derived ONCE for the whole batch - re-reading them per issue meant two
+        # walks of every node the repo owns and cost more than the LLM did.
+        batch_files: list[File] = [repo->:owns:->][?:File];
+        batch_seen: set[str] = {i.external_id for i in [repo->:owns:->][?:Issue]};
         try {
             remote_issues = fetch_open_issues(
                 target_full_name, self.limit, _session_token()
             );
+
+            # One pass: each issue is fully triaged AND clustered before the
+            # next one starts. Slower than batching the clustering, and that is
+            # deliberate - see the drain call below.
             for ri in remote_issues {
                 outcome: dict = _ingest_one(
                     repo,
@@ -953,26 +990,30 @@ walker:pub ingest_from_github {
                     ri.created_at,
                     ri.reactions,
                     ri.comment_velocity,
-                    dirty
+                    dirty,
+                    batch_files,
+                    batch_seen
                 );
-                # _ingest_one re-checks per issue and reports rather than
-                # writing when the issue is already here, so the skip count
-                # stays accurate without a separate pre-pass snapshot.
                 if outcome.get("skipped_duplicate", False) {
                     skipped += 1;
                 } else {
                     results.append(outcome);
                 }
-                if len(results) > 0 and len(results) % CLUSTER_DRAIN_EVERY == 0 {
-                    _drain_clusters(dirty, repo);
-                }
+                # Cluster IMMEDIATELY, every time a resolves_to edge lands.
+                #
+                # Coalescing this to every N issues is a genuine speedup (83s vs
+                # ~180s on the seed repo) and a genuine correctness bug: between
+                # drains, a file renders as a cluster AND as loose singletons at
+                # the same time - issues sitting outside the cluster they belong
+                # to. That is not "incomplete", it is contradictory, and accurate
+                # clustering is the product. The redundant gate calls are the
+                # accepted price of never displaying a wrong queue.
+                _drain_clusters(dirty, repo);
             }
         } finally {
             # Drain before releasing the lock, including on a mid-run failure -
             # otherwise a crashed run leaves issues resolved but unclustered.
             _drain_clusters(dirty, repo, sweep=True);
-            # Always release, including on a mid-run failure - a stuck lock
-            # would make the repo permanently un-ingestable until it aged out.
             repo.ingesting_since = 0.0;
         }
 
@@ -1039,10 +1080,13 @@ walker:pub generate_pr {
             title = f"fix({target_path}): {cluster.title}";
         }
 
+        # A fork contribution is a DRAFT until the human files it upstream, so
+        # record it as one - `url` points at the compare page they still have to
+        # act on, not at a pull request that does not exist.
         pr: PullRequest = PullRequest(
             number=result.pr_number,
-            url=result.pr_url,
-            status="open",
+            url=result.pr_url if result.pr_url else result.compare_url,
+            status="open" if result.pr_url else "ready_to_open",
             title=title,
             body=cluster.root_cause_summary,
         );
@@ -1057,7 +1101,10 @@ walker:pub generate_pr {
             "files_changed": [target_path],
             # True when we had no push access and contributed from a fork.
             "forked": result.forked,
-            "head_repo": result.head_repo
+            "head_repo": result.head_repo,
+            # Non-empty => nothing was filed upstream; this is the link the
+            # human opens to publish it themselves.
+            "compare_url": result.compare_url
         };
     }
 }
@@ -1105,8 +1152,8 @@ walker:pub generate_pr_for_issue {
 
         pr: PullRequest = PullRequest(
             number=result.pr_number,
-            url=result.pr_url,
-            status="open",
+            url=result.pr_url if result.pr_url else result.compare_url,
+            status="open" if result.pr_url else "ready_to_open",
             title=title,
             body=issue.title,
         );
@@ -1123,7 +1170,8 @@ walker:pub generate_pr_for_issue {
             "title": title,
             "files_changed": [target_path],
             "forked": result.forked,
-            "head_repo": result.head_repo
+            "head_repo": result.head_repo,
+            "compare_url": result.compare_url
         };
     }
 }
@@ -1254,6 +1302,8 @@ obj QueueResponse {
     # never checked. Lets the UI say WHY a queue is empty - no issues exist vs
     # issues exist but none have been triaged - instead of rendering nothing.
     has open_issue_count: int = -1;
+    # Non-empty when the code substrate was truncated - see Repo.index_note.
+    has index_note: str = "";
 }
 
 walker:pub get_queue {
@@ -1270,7 +1320,8 @@ walker:pub get_queue {
                 singletons=[],
                 unresolved=[],
                 weights=_weights_view(Settings()),
-                open_issue_count=-1
+                open_issue_count=-1,
+                index_note=""
             );
             disengage;
         }
@@ -1400,7 +1451,8 @@ walker:pub get_queue {
             singletons=singleton_views,
             unresolved=unresolved_views,
             weights=_weights_view(settings),
-            open_issue_count=repo.open_issue_count
+            open_issue_count=repo.open_issue_count,
+            index_note=repo.index_note
         );
     }
 }

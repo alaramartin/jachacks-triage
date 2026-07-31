@@ -928,6 +928,9 @@
     .hover\:border-\[var\(--color-border-strong\)\]:hover {
       border-color: var(--color-border-strong);
     }
+    .hover\:border-\[var\(--color-green\)\]:hover {
+      border-color: var(--color-green);
+    }
     .hover\:border-\[var\(--color-orange\)\]:hover {
       border-color: var(--color-orange);
     }

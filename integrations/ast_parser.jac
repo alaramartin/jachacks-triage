@@ -180,11 +180,62 @@ imports are dropped because they never resolve to a file in this repo).
 Handles Python and TypeScript/JavaScript, in that order. Returns
 files_indexed / import_edges, plus a per-language breakdown so the caller can
 say what it actually found."""
+# Creating a persisted graph node costs real time - measured at only ~30-40
+# File nodes/second - so the file COUNT, not parsing, is what makes indexing a
+# monorepo slow. Reading and scanning all 22,077 of next.js's JS/TS files takes
+# 5s; creating a node for each would take 10+ minutes.
+#
+# So there is a ceiling. Repos under it are completely unaffected (the seed repo,
+# flask, jac, and every one of the user's own repos are all well under), which
+# is what keeps the verification baselines valid.
+glob MAX_INDEXED_FILES: int = 1500;
+
+"""Which JS/TS files to keep when a repo exceeds the ceiling: the most
+depended-upon ones, by in-degree over the fully-parsed import graph.
+
+Parsing everything first is cheap (~5s even for next.js) and makes the cut
+principled rather than arbitrary - blast radius is about what code others
+depend on, so the files most imported are exactly the ones worth ranking
+issues against. A file nothing imports has a blast radius of 0 anyway, so it
+is the cheapest thing to drop."""
+def _rank_by_in_degree(
+    js_paths: list[str], targets_by_file: dict[str, list[str]], budget: int
+) -> list[str] {
+    in_degree: dict[str, int] = {};
+    for (_rel, targets) in targets_by_file.items() {
+        for t in targets {
+            in_degree[t] = in_degree.get(t, 0) + 1;
+        }
+    }
+    # Sort a (-in_degree, path) tuple list rather than passing a key lambda:
+    # negated so higher in-degree sorts first, path as a stable tiebreak.
+    ranked: list[tuple[int, str]] = [(-in_degree.get(p, 0), p) for p in js_paths];
+    ranked.sort();
+    return [row[1] for row in ranked[:budget]];
+}
+
 def build_code_substrate(repo_path: str, repo: Repo) -> dict[str, int] {
     py_paths: list[str] = _discover_python_files(repo_path);
-    js_paths: list[str] = discover_js_files(repo_path);
+    discovered_js: list[str] = discover_js_files(repo_path);
     module_map: dict[str, str] = build_module_map(repo_path, py_paths);
-    js_path_set: set[str] = set(js_paths);
+    js_path_set: set[str] = set(discovered_js);
+
+    # Parse before deciding what to keep - the parse is cheap, the nodes are not.
+    js_targets_by_file: dict[str, list[str]] = {};
+    for rel in discovered_js {
+        js_targets_by_file[rel] = js_targets(
+            _read_text(os.path.join(repo_path, rel)), rel, js_path_set
+        );
+    }
+
+    # Python is never dropped: those repos don't reach the ceiling, and dropping
+    # any would move the resolution baselines.
+    js_paths: list[str] = discovered_js;
+    if len(py_paths) + len(discovered_js) > MAX_INDEXED_FILES {
+        budget: int = max(0, MAX_INDEXED_FILES - len(py_paths));
+        js_paths = _rank_by_in_degree(discovered_js, js_targets_by_file, budget);
+    }
+    kept: set[str] = set(js_paths);
 
     file_nodes: dict[str, File] = {};
     for rel in py_paths {
@@ -213,9 +264,9 @@ def build_code_substrate(repo_path: str, repo: Repo) -> dict[str, int] {
         }
     }
     for rel in js_paths {
-        full_path: str = os.path.join(repo_path, rel);
-        source: str = _read_text(full_path);
-        for target_rel in js_targets(source, rel, js_path_set) {
+        # _link already drops any target that wasn't kept, so a truncated index
+        # yields a truncated-but-consistent graph rather than dangling edges.
+        for target_rel in js_targets_by_file.get(rel, []) {
             if _link(file_nodes, seen, rel, target_rel) {
                 edge_count += 1;
             }
@@ -228,7 +279,9 @@ def build_code_substrate(repo_path: str, repo: Repo) -> dict[str, int] {
         "files_indexed": total,
         "import_edges": edge_count,
         "python_files": len(py_paths),
-        "js_files": len(js_paths)
+        "js_files": len(js_paths),
+        "files_discovered": len(py_paths) + len(discovered_js),
+        "files_skipped": len(discovered_js) - len(js_paths)
     };
 }
 
