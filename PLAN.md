@@ -2241,3 +2241,35 @@ weights loaded, reset + "blast radius only" presets).
   cost of re-indexing 2,035 files.
 - A cold seed-repo ingest is ~180s now (was 83s coalesced, ~194s originally). That is the
   deliberate trade for never rendering a contradictory queue.
+
+## get_queue was O(files) — fixed (2026-07-30)
+
+`edge owns` fanned out to `File | Issue | Cluster | Unresolved | PullRequest | Settings`, so
+`[repo->:owns:->][?:Issue]` had to walk and load **every File node** to find a handful of
+issues - and `get_queue` did that **three times** (issues, clusters, settings). On
+`vercel/next.js` that was ~4,500 node loads to return 9 issues, on an endpoint the dashboard
+polls every 5 seconds.
+
+- [x] **Three traversals → one.** `get_queue` walks `owns` once and partitions by type.
+- [x] **`edge contains: Repo --> File`.** Files no longer share an edge with the issue layer,
+      which is what CLAUDE.md #4's "two node families" always claimed - now structural rather
+      than a filter applied at every read. Typed endpoints, so readers need no `[?:File]`.
+- [x] **One read path: `_repo_files(repo)`** - tries `contains`, falls back to `owns`. The
+      fallback is the safety property, not a nicety: `owns` is untyped, so a missed call site
+      would not error, it would silently return an empty list and a repo would read as having
+      no files. Routing all five reads through one function makes that class of bug impossible.
+- [x] **`walker:pub migrate_file_edges`** moves existing repos in place - adds `contains`,
+      removes only the repo→file `owns` edge. **No File node is deleted**, so `resolves_to`
+      edges from already-resolved issues are untouched. Idempotent (re-run reports 0).
+- [x] `dedupe_repos` sweeps both edges, or a deleted duplicate would orphan its files.
+
+**Measured after migrating all 8 repos (2,016 files moved, 0 left on `owns`):**
+
+| | before | after |
+| --- | --- | --- |
+| `owns` edges in the graph | 2,076 | **60** (issue layer only) |
+| `get_queue` on next.js (1500 files) | slow enough to time out a 25s request under load | **2.33s** |
+| `get_queue` on the seed repo | — | 1.07s, 3 clusters correct |
+
+Seed repo unchanged throughout: `core/validation.py` ×4 / blast 14, `models/product.py` ×2,
+`services/upload.py` ×2.

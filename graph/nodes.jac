@@ -130,6 +130,16 @@ edge owns {}  # Repo -> File | Issue | Cluster | Unresolved | PullRequest | Sett
 
 # Single-target edges are declared with typed endpoints so every traversal
 # infers the right node type with no per-read [?:...] filter needed.
+# Repo -> File. Deliberately NOT `owns`.
+#
+# CLAUDE.md #4 calls this graph "two node families"; this is what makes that
+# structural instead of a filter applied at every read. When files hung off
+# `owns` alongside the issue layer, `[repo->:owns:->][?:Issue]` had to walk and
+# load EVERY file to find a handful of issues - ~1500 node loads per call on
+# vercel/next.js, three times per get_queue, polled every 5s by the dashboard.
+# Typed endpoints, so readers need no [?:File] filter.
+edge contains: Repo --> File {}
+
 edge imports: File --> File {}  # DIRECTION IS CRITICAL. See CLAUDE.md #4.3.
 
 edge resolves_to: Issue --> File {}

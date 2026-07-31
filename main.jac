@@ -13,6 +13,7 @@ import from graph.nodes {
     Settings,
     AssessmentCache,
     owns,
+    contains,
     resolves_to,
     parked,
     grouped_in,
@@ -93,6 +94,25 @@ def _all_repos() -> list[Repo] {
 def _session_token() -> str {
     auth: GithubAuth | None = _auth_node();
     return auth.access_token if auth is not None else "";
+}
+
+"""Every File node this repo indexed - the ONLY place that reads them.
+
+Files live on `contains`, not `owns`, so reading the issue layer no longer has
+to walk and load every file (see graph/nodes.jac). The `owns` fallback covers
+repos indexed BEFORE that split: their files are still on `owns`, and rather
+than force a re-index of every repo, they keep working and pick up the fast
+path whenever they next get re-indexed.
+
+Routing all reads through one function is deliberate: `owns` is untyped, so a
+missed call site would not fail - it would silently return an empty list, and a
+repo with no files reads as "nothing to rank" rather than as an error."""
+def _repo_files(repo: Repo) -> list[File] {
+    files: list[File] = [repo->:contains:->];
+    if len(files) > 0 {
+        return files;
+    }
+    return [repo->:owns:->][?:File];
 }
 
 def _repo_by_name(name: str) -> Repo | None {
@@ -514,7 +534,7 @@ walker:pub select_repo {
         repo.repo_path = cloned.path;
         repo.last_selected = time.time();
 
-        already_indexed: list[File] = [repo->:owns:->][?:File];
+        already_indexed: list[File] = _repo_files(repo);
         files_indexed: int = 0;
         import_edges: int = 0;
         python_files: int = 0;
@@ -644,7 +664,7 @@ walker:pub reindex_repo {
         # and pr_agent can read real source instead of assuming "seed/repo".
         repo.repo_path = self.repo_path;
 
-        already_indexed: list[File] = [repo->:owns:->][?:File];
+        already_indexed: list[File] = _repo_files(repo);
         if len(already_indexed) > 0 {
             # Idempotent: reindex_repo is safe to call repeatedly during rehearsal
             # without duplicating File nodes or resetting computed blast radii.
@@ -735,7 +755,7 @@ periodic drain would be pure waste."""
 def _drain_clusters(dirty: list[File], repo: Repo, sweep: bool = False) -> None {
     targets: list[File] = [t for t in dirty];
     if sweep {
-        for f in [repo->:owns:->][?:File] {
+        for f in _repo_files(repo) {
             if len([f<-:resolves_to:<-]) >= 2
             and len([f<-:cluster_targets:<-]) == 0
             and f not in targets {
@@ -785,7 +805,7 @@ def _ingest_one(
         };
     }
 
-    files: list[File] = files_hint if files_hint is not None else [repo->:owns:->][?:File];
+    files: list[File] = files_hint if files_hint is not None else _repo_files(repo);
     file_paths: list[str] = [f.path for f in files];
 
     # One LLM round trip when an explicit signal placed the issue, one when the
@@ -971,7 +991,7 @@ walker:pub ingest_from_github {
         dirty: list[File] = [];
         # Derived ONCE for the whole batch - re-reading them per issue meant two
         # walks of every node the repo owns and cost more than the LLM did.
-        batch_files: list[File] = [repo->:owns:->][?:File];
+        batch_files: list[File] = _repo_files(repo);
         batch_seen: set[str] = {i.external_id for i in [repo->:owns:->][?:Issue]};
         try {
             remote_issues = fetch_open_issues(
@@ -1327,17 +1347,29 @@ walker:pub get_queue {
         }
         repo: Repo = matches[0];
 
-        all_issues: list[Issue] = [repo->:owns:->][?:Issue];
-        all_clusters: list[Cluster] = [repo->:owns:->][?:Cluster];
+        # ONE walk of `owns`, partitioned by type - it used to be three
+        # separate traversals (issues, clusters, settings), each loading every
+        # node the repo owns. This endpoint is polled every 5s by the dashboard.
+        all_issues: list[Issue] = [];
+        all_clusters: list[Cluster] = [];
+        owned_settings: list[Settings] = [];
+        for n in [repo->:owns:->] {
+            if isinstance(n, Issue) {
+                all_issues.append(n);
+            } elif isinstance(n, Cluster) {
+                all_clusters.append(n);
+            } elif isinstance(n, Settings) {
+                owned_settings.append(n);
+            }
+        }
 
         # (REACH, PLAN.md Phase C step 3) Read-time re-rank against the repo's
         # current Settings - defaults to the locked blast-dominant weights if
         # set_weights was never called. Never touches the stored Issue/Cluster
         # .urgency (that stays whatever the ingest-time cascade wrote), so the
         # demo's default numbers are unaffected unless a viewer moves sliders.
-        settings_matches: list[Settings] = [repo->:owns:->][?:Settings];
-        settings: Settings = settings_matches[0]
-            if len(settings_matches) > 0
+        settings: Settings = owned_settings[0]
+            if len(owned_settings) > 0
             else Settings();
         max_reactions: int = max([i.reactions for i in all_issues], default=0);
         max_comment_velocity: float = max(
@@ -1642,7 +1674,9 @@ def _collapse_duplicate_repos() -> list[dict] {
             }
             # Collect BEFORE deleting - deleting while walking the `owns`
             # edges invalidates the edge anchors mid-iteration.
-            doomed: list = [n for n in [r->:owns:->]];
+            # BOTH edges: files hang off `contains` now, so an owns-only
+            # sweep would leave a deleted duplicate's File nodes orphaned.
+            doomed: list = [n for n in [r->:owns:->]] + [n for n in [r->:contains:->]];
             for n in doomed {
                 del n;
             }
@@ -1651,6 +1685,43 @@ def _collapse_duplicate_repos() -> list[dict] {
         }
     }
     return removed;
+}
+
+# Maintenance: move a repo's File nodes from the `owns` edge onto `contains`.
+#
+# Repos indexed before the split keep working via _repo_files' fallback, but
+# they never get the speedup - get_queue still walks every file to find the
+# issues. This migrates them in place: it adds the `contains` edge and removes
+# only the repo->file `owns` edge. No File NODE is deleted, so the resolves_to
+# edges of issues already resolved onto those files are untouched. Idempotent.
+walker:pub migrate_file_edges {
+    can go with Root entry {
+        moved: list[dict] = [];
+        for repo in _all_repos() {
+            legacy: list[File] = [repo->:owns:->][?:File];
+            if len(legacy) == 0 {
+                continue;
+            }
+            for f in legacy {
+                if len([f<-:contains:<-]) == 0 {
+                    repo +>:contains:+> f;
+                }
+                # Iterate-del the specific repo->file edge (jac-node-edge-patterns:
+                # the `del -->` disconnect operator is untyped-only).
+                for e in [edge repo ->:owns:-> f] {
+                    del e;
+                }
+            }
+            moved.append(
+                {
+                    "full_name": repo.full_name,
+                    "files_moved": len(legacy),
+                    "still_on_owns": len([repo->:owns:->][?:File])
+                }
+            );
+        }
+        report {"ok": True, "repos_migrated": len(moved), "detail": moved};
+    }
 }
 
 walker:pub dedupe_repos {

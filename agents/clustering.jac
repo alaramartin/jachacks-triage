@@ -14,6 +14,7 @@ import from graph.nodes {
     Issue,
     Cluster,
     owns,
+    contains,
     resolves_to,
     grouped_in,
     cluster_targets
@@ -35,6 +36,17 @@ def _read_source(path: str, repo_root: str) -> str {
     source: str = fh.read();
     fh.close();
     return source;
+}
+
+"""The Repo that indexed this File. Files hang off `contains` now; the `owns`
+fallback keeps repos indexed before that split working (see main.jac's
+_repo_files for the same pattern)."""
+def _owning_repo(target: File) -> list[Repo] {
+    owners: list[Repo] = [target<-:contains:<-];
+    if len(owners) > 0 {
+        return owners;
+    }
+    return [target<-:owns:<-][?:Repo];
 }
 
 obj RootCauseGate {
@@ -71,7 +83,7 @@ def maybe_cluster(target: File) -> Cluster | None {
     }
 
     summaries: list[str] = [f"{m.external_id}: {m.title} - {m.body}" for m in members];
-    owning: list[Repo] = [target<-:owns:<-][?:Repo];
+    owning: list[Repo] = _owning_repo(target);
     repo_root: str = owning[0].repo_path if len(owning) > 0 else "";
     source_code: str = _read_source(target.path, repo_root);
     gate: RootCauseGate = assess_root_cause(target.path, source_code, summaries);
@@ -96,7 +108,7 @@ def maybe_cluster(target: File) -> Cluster | None {
     if len(existing) > 0 {
         cluster = existing[0];
     } else {
-        repos: list[Repo] = [target<-:owns:<-][?:Repo];
+        repos: list[Repo] = _owning_repo(target);
         # NO `[0]` here - same environment split as main.jac's reindex_repo:
         # on the demo machine `+>:owns:+>` yields the bare node. See PLAN.md.
         cluster = repos[0] +>:owns:+> Cluster(cluster_key=target.path);

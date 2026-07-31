@@ -9,7 +9,7 @@ and blast radius is computed correctly within each."""
 import ast;
 import os;
 
-import from graph.nodes { Repo, File, owns, imports }
+import from graph.nodes { Repo, File, owns, contains, imports }
 import from integrations.js_parser { discover_js_files, js_targets, js_language_of }
 
 # Directories that are never the project's own source. Cloned third-party
@@ -242,14 +242,14 @@ def build_code_substrate(repo_path: str, repo: Repo) -> dict[str, int] {
         full_path: str = os.path.join(repo_path, rel);
         loc: int = len(_read_text(full_path).splitlines());
         f: File = File(path=rel, loc=loc, language="python");
-        repo +>:owns:+> f;
+        repo +>:contains:+> f;
         file_nodes[rel] = f;
     }
     for rel in js_paths {
         full_path: str = os.path.join(repo_path, rel);
         loc: int = len(_read_text(full_path).splitlines());
         f: File = File(path=rel, loc=loc, language=js_language_of(rel));
-        repo +>:owns:+> f;
+        repo +>:contains:+> f;
         file_nodes[rel] = f;
     }
 
