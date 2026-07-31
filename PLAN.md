@@ -2313,3 +2313,73 @@ reported as `-1` on that path. **60s -> 1.7s.**
 Seed repo unchanged throughout: `core/validation.py` ×4 / blast 14, `models/product.py` ×2,
 `services/upload.py` ×2, parked {18,20,26,27}, and correctly shows no resume banner because it
 is fully triaged.
+
+---
+
+# STATUS — end of the post-hackathon pass (2026-07-30)
+
+## What works
+
+All five requested items plus TypeScript/JavaScript support are done, committed and verified
+against the seed repo's known-good baseline (`core/validation.py` ×4 at blast radius 14,
+`models/product.py` ×2, `services/upload.py` ×2, parked `{18,20,26,27}`, zero resolution drift).
+
+| | state |
+| --- | --- |
+| Index any open-source repo | works, incl. monorepos (bounded) |
+| Duplicate issues / clusters | fixed: per-issue re-check + per-repo ingest lock + `dedupe_issues` repair |
+| Generate PR | works; **fork-first** for repos you don't own |
+| Personalized ranking weights | 5 weights, stored + reloaded, reset and "blast radius only" presets |
+| PR quality | root cause, real diff, `Closes #n` links, provenance table, risks, suggested test |
+| Speed | seed repo ~80s cold; `get_queue` on a 1500-file repo 2.33s; re-opening an indexed repo 1.7s |
+| Languages | Python (`ast`) + TypeScript/JavaScript (`js_parser`) |
+
+## Known limitations
+
+**PR generation has no size sanity check.** This is the most important one: the fix generated
+for `pallets/flask#6113` **deleted 157 of 173 lines** of `src/flask/testing.py`. The Python
+syntax gate passed, because a gutted file is still valid Python. Nothing refuses a patch that
+removes most of a file. A real PR went out under the user's name and the account was blocked
+from that repo. Fix the guard before anyone opens another PR on a repo they care about.
+
+**Hardware is the floor on speed.** ~1.2s per LLM call on a local 7B / M2, and parallelism is
+useless - measured flat wall-clock at 1, 2 and 4 workers because the GPU saturates on a single
+request. Ingest is ~5-10s/issue, so a 2,208-issue repo is ~3 hours. "Triage the rest" is
+all-or-nothing; a "next N" batch option would suit big repos better.
+
+**Correctness costs speed in clustering.** The gate re-runs on every membership change (N-1
+redundant calls per file). Coalescing it was ~2x faster and rendered a file as a cluster AND as
+loose singletons between drains, so it stays immediate.
+
+**Monorepos are indexed partially.** `MAX_INDEXED_FILES = 1500` chosen by in-degree; blast
+radius therefore understates for truncated repos, which `Repo.index_note` discloses on screen.
+Graph node creation runs at ~39/s, a runtime limit - indexing next.js is 156s regardless.
+
+**Schema changes on persisted nodes are dangerous here.** Adding two fields to `Issue` shifted
+its fingerprint and jac wrote the *edges but not the nodes* - 0 `Issue` anchors beside 16
+`resolves_to`. `rm -rf .jac/cache` clears the compile cache, not persisted anchors, and there is
+no migration mechanism. Treat any `node` field addition as requiring a data plan.
+
+**Smaller ones.** The dev graph still holds dangling edges from that failure (verified harmless).
+`_repo_files`' `owns` fallback and the `migrate_file_edges` walker are transitional and are dead
+weight for a fresh install. Issues ingested before `comment_velocity` became a float are stuck at
+0 until re-ingested. `PROMPT_VERSION` must be bumped by hand when a semstring changes or the
+assessment cache serves stale verdicts. The fork path needs OAuth - a fine-grained PAT cannot
+create forks. Python and TS/JS only.
+
+## Future directions, roughly by value
+
+1. **Diff-size guard on PR generation** - refuse to open a PR whose patch deletes more than some
+   fraction of the file, and surface it as "the model produced a bad patch" rather than filing
+   it. Small, and it is the difference between proposing a wrong fix and publishing one.
+2. **Cache the clustering verdict** keyed on a hash of the member set, so re-running the gate
+   with identical membership is free. Recovers most of the coalescing speedup without
+   reintroducing the inconsistent-render bug.
+3. **Batched resume** - "triage the next 100" alongside "the rest", for repos in the thousands.
+4. **Strip the transitional code** once no un-migrated graph exists: the `owns` fallback in
+   `_repo_files` and the `migrate_file_edges` walker.
+5. **`get_queue` pagination** for very large queues - it is now O(issues) rather than O(files),
+   but a 2,000-issue queue still serializes every row on every 5s poll.
+6. **More languages** - the parser interface is now proven by two implementations; Go or Rust
+   would be one new module plus a branch in `build_code_substrate`.
+7. **A real migration mechanism** for node schema changes, given the failure mode above.
