@@ -2273,3 +2273,43 @@ polls every 5 seconds.
 
 Seed repo unchanged throughout: `core/validation.py` ×4 / blast 14, `models/product.py` ×2,
 `services/upload.py` ×2.
+
+## Open-issue count was wrong, and a partial queue had no way forward (2026-07-30)
+
+Reported: next.js shows ~9 issues out of 2.2k, with nothing indicating more are coming.
+Two separate defects, both real.
+
+### 1. The count was wrong, and most issues were unreachable
+
+`count_open_issues` and `fetch_open_issues` both paged `/issues` with a hard `while page <= 10`
+(1,000 rows). `/issues` interleaves pull requests, and next.js's oldest 1,000 rows are
+overwhelmingly ancient PRs - so it found **209 issues against a real 2,208**. That number was
+not a slow count, it was a wrong one, and the ingest was silently truncated to the same 209:
+the other ~2,000 issues could never be reached no matter how long it ran.
+
+- [x] `count_open_issues` uses the **search API** (`is:issue is:open`), which filters
+      server-side and returns an exact `total_count` in ONE call. Verified: 2,208. Falls back
+      to paging if search is unavailable (it has a lower rate limit).
+- [x] `MAX_ISSUE_PAGES = 200` replaces the hard 10, with the reason recorded at the constant.
+
+### 2. A partially-triaged repo was a dead end
+
+The "triaging in the background" banner only renders when the picker put `ingesting=1` in the
+URL. Land on `/queue` any other way - reload, direct visit, or after an interrupted run - and a
+repo with 9 of 2,208 issues rendered its 9 rows as though that were the whole story, with no
+way to continue except going back to the picker and re-opening the repo.
+
+- [x] The queue now computes `untriaged = open_issue_count - rows` and, when that is positive
+      and nothing is ingesting, shows: **"9 of 2208 open issues triaged. 2199 still to go -
+      roughly 183 min."** with a **Triage the rest** button that starts the ingest in place.
+      Guarded by a `resuming` flag so it cannot be double-fired into two overlapping ingests.
+
+### 3. Re-opening an indexed repo took 60 seconds
+
+`select_repo` recomputed `count_import_edges` over every indexed file on the already-indexed
+path - 1,500 import traversals on next.js - and no client screen reads that field there. Now
+reported as `-1` on that path. **60s -> 1.7s.**
+
+Seed repo unchanged throughout: `core/validation.py` ×4 / blast 14, `models/product.py` ×2,
+`services/upload.py` ×2, parked {18,20,26,27}, and correctly shows no resume banner because it
+is fully triaged.

@@ -563,7 +563,11 @@ walker:pub select_repo {
 
         if len(already_indexed) > 0 and not stale_substrate {
             files_indexed = repo.file_count;
-            import_edges = count_import_edges(already_indexed);
+            # NOT recounted here. count_import_edges walks the imports of every
+            # indexed file - 1500 traversals on next.js, ~60s - and no client
+            # screen reads this field on the already-indexed path. Re-opening a
+            # repo you have already indexed should be instant.
+            import_edges = -1;
             python_files = len([f for f in already_indexed if f.language == "python"]);
             js_files = files_indexed - python_files;
         } else {

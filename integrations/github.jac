@@ -381,6 +381,12 @@ calls: pointing Triage at a repo with 400 open issues takes a long time.
 Issues always come back most-recently-updated first, so whether or not a run
 is capped, the queue fills with what is actually live rather than with
 whatever was filed in 2014."""
+# /issues interleaves pull requests, so a repo with a long PR history burns
+# most of each page on rows we discard. 10 pages (1,000 rows) yielded just 209
+# of next.js's 2,208 issues - a silent truncation that made most of the queue
+# unreachable. 200 pages is 20,000 rows, enough to walk any realistic repo.
+glob MAX_ISSUE_PAGES: int = 200;
+
 def fetch_open_issues(
     full_name: str, limit: int = 0, token: str = ""
 ) -> list[RemoteIssue] {
@@ -393,7 +399,7 @@ def fetch_open_issues(
     # repo, so it stays created-ascending. Capped runs still take the most
     # recently updated, which is the whole point of a cap.
     order: str = "created&direction=asc" if limit <= 0 else "updated&direction=desc";
-    while page <= 10 {
+    while page <= MAX_ISSUE_PAGES {
         rows: list[dict] | None = _api_get_list(
             f"https://api.github.com/repos/{full_name}/issues"
             f"?state=open&per_page=100&page={page}&sort={order}",
@@ -444,15 +450,30 @@ def _days_since(iso_timestamp: str) -> float {
 
 """The number of genuinely open ISSUES on `full_name`.
 
-Not the same as `RepoSummary.open_issues`: GitHub's `open_issues_count` field
-counts pull requests too (jaseci-labs/Agentic-AI reports 44 there but has 37
-issues and 7 PRs), so showing that number next to "issues" is just wrong.
-Costs one extra API call, which is why only select_repo uses it and the repo
-grid sticks with the cheap field it already got from the listing."""
+Not the same as `RepoSummary.open_issues`: GitHub's `open_issues_count` counts
+pull requests too (next.js reports 4,203 there against 2,208 real issues), so
+showing that number next to "issues" is just wrong.
+
+Uses the SEARCH api, which filters to issues server-side and returns an exact
+`total_count` in ONE call. The old approach paged /issues and counted non-PR
+rows, capped at 10 pages - and since /issues interleaves PRs, next.js's first
+1,000 rows contained only 209 issues, so the repo reported "209 open issues"
+against a real 2,208. It was not a slow count, it was a wrong one.
+
+Falls back to the paged count if search is unavailable (it has its own, lower
+rate limit)."""
 def count_open_issues(full_name: str, token: str = "") -> int {
+    found: dict | None = _api_get(
+        f"https://api.github.com/search/issues?q=repo:{full_name}+is:issue+is:open&per_page=1",
+        token
+    );
+    if found is not None and "total_count" in found {
+        return found["total_count"];
+    }
+
     total: int = 0;
     page: int = 1;
-    while page <= 10 {
+    while page <= MAX_ISSUE_PAGES {
         rows: list[dict] | None = _api_get_list(
             f"https://api.github.com/repos/{full_name}/issues"
             f"?state=open&per_page=100&page={page}",

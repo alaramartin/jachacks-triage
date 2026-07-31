@@ -21,7 +21,8 @@ sv import from ...main {
     generate_pr,
     generate_pr_for_issue,
     set_weights,
-    get_active_repo
+    get_active_repo,
+    ingest_from_github
 }
 import from ..components.ClusterRow { ClusterRow }
 import from ..components.SingletonRow { SingletonRow }
@@ -127,6 +128,10 @@ def:pub QueueScreen -> JsxElement {
         # changes and it re-arms with fresh state - even on a failed refetch,
         # which changes neither issue_total nor stable_polls.
         poll_tick: int = 0,
+        # Set while a "triage the rest" run kicked off from this screen is
+        # starting, so the button can't be double-fired into two overlapping
+        # ingests (the exact thing that produced duplicate issues before).
+        resuming: bool = False,
         # id -> True while its walker is in flight, so the button can show a
         # spinner. Drafting a PR takes ten-plus seconds (real source read, a
         # full-file by llm() rewrite, then the GitHub call).
@@ -310,6 +315,21 @@ def:pub QueueScreen -> JsxElement {
         nav("/cluster/" + cluster_id);
     }
 
+    # A partially-triaged repo used to be a dead end: the queue rendered its 9
+    # rows with no indication that 2,199 more existed and no way to continue,
+    # because the "triaging in the background" banner only appears when the
+    # picker put ingesting=1 in the URL. This is the way back in.
+    async def handle_resume_ingest(_e: MouseEvent) {
+        if resuming or ingesting {
+            return;
+        }
+        resuming = True;
+        root spawn ingest_from_github(full_name=active_repo, limit=0);
+        ingesting = True;
+        stable_polls = 0;
+        resuming = False;
+    }
+
     def toggle_settings {
         settings_open = not settings_open;
     }
@@ -448,11 +468,18 @@ def:pub QueueScreen -> JsxElement {
         if known_open == 0 {
             empty_message = "This repository has no open issues. Nothing to triage - which is the good outcome.";
         } elif known_open > 0 {
-            empty_message = f"This repository has {str(known_open)} open issues on GitHub, but none have been triaged into the graph yet. Re-open it from Your projects to start ingestion.";
+            empty_message = f"This repository has {str(known_open)} open issues on GitHub, but none have been triaged into the graph yet.";
         } else {
-            empty_message = "No issues have been triaged into this repository's queue yet. Re-open it from Your projects to start ingestion.";
+            empty_message = "No issues have been triaged into this repository's queue yet.";
         }
     }
+
+    # A PARTIALLY triaged repo is the case that had no representation at all:
+    # the queue showed its rows as though that were the whole story. Nothing
+    # said 2,199 more issues existed, and the only way to continue was to go
+    # back to the picker and re-open the repo.
+    untriaged = known_open - total_rows if known_open > 0 else 0;
+    show_resume = untriaged > 0 and not ingesting;
 
     return
         <div className="min-h-screen px-6 sm:px-12 py-10 max-w-6xl mx-auto">
@@ -558,7 +585,29 @@ def:pub QueueScreen -> JsxElement {
                     </button>
                 </div>
             }}
-            {empty_message
+            {show_resume
+            and <div
+                className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 flex items-center justify-between gap-4"
+            >
+                <span className="text-sm text-[var(--color-text-muted)]">
+                    <span className="text-[var(--color-text)]">
+                        {str(total_rows)} of {str(known_open)}
+                    </span>
+                    {" "}
+                    open issues triaged.{" "}
+                    {str(untriaged)}
+                    {" "}
+                    still to go - roughly {str(max(1, round(untriaged * 5 / 60)))} min.
+                </span>
+                <button
+                    onClick={handle_resume_ingest}
+                    disabled={resuming}
+                    className="shrink-0 rounded-lg border border-[var(--color-green)]/50 px-3 py-2 text-xs font-medium text-[var(--color-green)] transition-colors hover:bg-[var(--color-green-soft)] disabled:opacity-40"
+                >
+                    {"Starting..." if resuming else "Triage the rest"}
+                </button>
+            </div>}
+                        {empty_message
             and <div
                 className="mt-10 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-6 py-10 text-center"
             >
